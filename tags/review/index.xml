@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>review on Gar Reversing</title>
+    <link>https://gar-re.github.io/tags/review/</link>
+    <description>Recent content in review on Gar Reversing</description>
+    <generator>Hugo -- gohugo.io</generator>
+    <lastBuildDate>Fri, 16 Jun 2023 00:00:00 +0000</lastBuildDate><atom:link href="https://gar-re.github.io/tags/review/index.xml" rel="self" type="application/rss+xml" />
+    <item>
+      <title>OSEE Certification Review</title>
+      <link>https://gar-re.github.io/posts/osee-review/</link>
+      <pubDate>Fri, 16 Jun 2023 00:00:00 +0000</pubDate>
+      
+      <guid>https://gar-re.github.io/posts/osee-review/</guid>
+      <description>&lt;p&gt;&amp;ldquo;The OSEE is the most difficult exploit development certification you can earn.&amp;rdquo; (&lt;a href=&#34;https://www.offsec.com/courses/exp-401/&#34;&gt;OffSec&lt;/a&gt;). To attempt the 72-hour exam you have to have physically attended the demanding EXP-401: Advanced Windows Exploitation (AWE) course that has limited seats available.
+At the time of writing it is estimated that there are only around 100 OSEEs in the world whilst the course is taught since 2011.&lt;/p&gt;</description>
+    </item>
+    
+  </channel>
+</rss>

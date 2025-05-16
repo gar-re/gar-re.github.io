@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Posts on Gar Reversing</title>
+    <link>https://gar-re.github.io/posts/</link>
+    <description>Recent content in Posts on Gar Reversing</description>
+    <generator>Hugo -- gohugo.io</generator>
+    <lastBuildDate>Sat, 30 Sep 2023 00:00:00 +0000</lastBuildDate><atom:link href="https://gar-re.github.io/posts/index.xml" rel="self" type="application/rss+xml" />
+    <item>
+      <title>OSEE Certification Review</title>
+      <link>https://gar-re.github.io/posts/osee-review/</link>
+      <pubDate>Fri, 16 Jun 2023 00:00:00 +0000</pubDate>
+      
+      <guid>https://gar-re.github.io/posts/osee-review/</guid>
+      <description>&lt;p&gt;&amp;ldquo;The OSEE is the most difficult exploit development certification you can earn.&amp;rdquo; (&lt;a href=&#34;https://www.offsec.com/courses/exp-401/&#34;&gt;OffSec&lt;/a&gt;). To attempt the 72-hour exam you have to have physically attended the demanding EXP-401: Advanced Windows Exploitation (AWE) course that has limited seats available.
+At the time of writing it is estimated that there are only around 100 OSEEs in the world whilst the course is taught since 2011.&lt;/p&gt;</description>
+    </item>
+    
+    <item>
+      <title>Delaying Kernel Payloads by Hijacking KTIMERs &amp; KDPCs (Part 2)</title>
+      <link>https://gar-re.github.io/posts/ktimer-hijack-pt2/</link>
+      <pubDate>Sat, 30 Sep 2023 00:00:00 +0000</pubDate>
+      
+      <guid>https://gar-re.github.io/posts/ktimer-hijack-pt2/</guid>
+      <description>&lt;p&gt;In this two part blog post series we present KTIMER hijacking, a novel post-exploitation technique that delays the execution of kernel-mode payloads.
+In the first part whe focussed on Windows 11 timer internals and deferred procedure calls and showed that we can hijack &lt;code&gt;KTIMER&lt;/code&gt; and &lt;code&gt;KDCP&lt;/code&gt; objects to delay the execution of a function pointer. This second part focusses on implementing these findings in a proof of concept, illustrating the delay in execution of a kernel-mode payload.&lt;/p&gt;</description>
+    </item>
+    
+    <item>
+      <title>Delaying Kernel Payloads by Hijacking KTIMERs &amp; KDPCs (Part 1)</title>
+      <link>https://gar-re.github.io/posts/ktimer-hijack-pt1/</link>
+      <pubDate>Fri, 15 Sep 2023 00:00:00 +0000</pubDate>
+      
+      <guid>https://gar-re.github.io/posts/ktimer-hijack-pt1/</guid>
+      <description>&lt;p&gt;In this two part blog post series we present KTIMER hijacking, a novel post-exploitation technique that delays the execution of kernel-mode payloads.
+This first part will focus on Windows 11 timer internals and deferred procedure calls and how we can hijack &lt;code&gt;KTIMER&lt;/code&gt; and &lt;code&gt;KDCP&lt;/code&gt; objects to delay the execution of a function pointer. The second part focusses on implementing these findings in a proof of concept, illustrating the delay in execution of a kernel-mode payload.&lt;/p&gt;</description>
+    </item>
+    
+    <item>
+      <title>Flare-On 9: 09_encryptor</title>
+      <link>https://gar-re.github.io/posts/flareon9-9/</link>
+      <pubDate>Sat, 12 Nov 2022 00:00:00 +0000</pubDate>
+      
+      <guid>https://gar-re.github.io/posts/flareon9-9/</guid>
+      <description>&lt;p&gt;&lt;a href=&#34;http://flare-on.com&#34;&gt;Flare-On&lt;/a&gt; is an annual single player reverse engineering CTF that represents the skills and challenges that the Mandiant FLARE team faces. The 8-12 challenges increase in difficulty and participants have about 6 weeks to complete them all in order to win a prize.&lt;/p&gt;</description>
+    </item>
+    
+    <item>
+      <title>CVE-2022-27438</title>
+      <link>https://gar-re.github.io/posts/cve-2022-27438/</link>
+      <pubDate>Wed, 01 Jun 2022 00:00:00 +0000</pubDate>
+      
+      <guid>https://gar-re.github.io/posts/cve-2022-27438/</guid>
+      <description>&lt;p&gt;Caphyon Ltd Advanced Installer 19.3 &amp;ldquo;CustomDetection&amp;rdquo; Update Check Remote Code Execution Vulnerability (&lt;a href=&#34;https://github.com/gar-re/cve-2022-27438/blob/main/cve-2022-27438_public-advisory.pdf&#34;&gt;PDF&lt;/a&gt;)&lt;/p&gt;</description>
+    </item>
+    
+    <item>
+      <title>CVE-2022-28944</title>
+      <link>https://gar-re.github.io/posts/cve-2022-28944/</link>
+      <pubDate>Tue, 10 May 2022 00:00:00 +0000</pubDate>
+      
+      <guid>https://gar-re.github.io/posts/cve-2022-28944/</guid>
+      <description>&lt;p&gt;EMCO Software Multiple Products Unauthenticated Update Remote Code Execution Vulnerability (&lt;a href=&#34;https://github.com/gar-re/cve-2022-28944/blob/main/cve-2022-28944_public-advisory.pdf&#34;&gt;PDF&lt;/a&gt;)&lt;/p&gt;</description>
+    </item>
+    
+    <item>
+      <title>CVE-2022-24644</title>
+      <link>https://gar-re.github.io/posts/cve-2022-24644/</link>
+      <pubDate>Fri, 04 Mar 2022 00:00:00 +0000</pubDate>
+      
+      <guid>https://gar-re.github.io/posts/cve-2022-24644/</guid>
+      <description>&lt;p&gt;ZZ Inc. KeyMouse 3.08 (Windows) Unauthenticated Update Remote Code Execution Vulnerability (&lt;a href=&#34;https://github.com/gar-re/cve-2022-24644/blob/main/cve-2022-24644_public-advisory.pdf&#34;&gt;PDF&lt;/a&gt;)&lt;/p&gt;</description>
+    </item>
+    
+  </channel>
+</rss>

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>coordinated_release on Gar Reversing</title>
+    <link>https://gar-re.github.io/tags/coordinated_release/</link>
+    <description>Recent content in coordinated_release on Gar Reversing</description>
+    <generator>Hugo -- gohugo.io</generator>
+    <lastBuildDate>Wed, 01 Jun 2022 00:00:00 +0000</lastBuildDate><atom:link href="https://gar-re.github.io/tags/coordinated_release/index.xml" rel="self" type="application/rss+xml" />
+    <item>
+      <title>CVE-2022-27438</title>
+      <link>https://gar-re.github.io/posts/cve-2022-27438/</link>
+      <pubDate>Wed, 01 Jun 2022 00:00:00 +0000</pubDate>
+      
+      <guid>https://gar-re.github.io/posts/cve-2022-27438/</guid>
+      <description>&lt;p&gt;Caphyon Ltd Advanced Installer 19.3 &amp;ldquo;CustomDetection&amp;rdquo; Update Check Remote Code Execution Vulnerability (&lt;a href=&#34;https://github.com/gar-re/cve-2022-27438/blob/main/cve-2022-27438_public-advisory.pdf&#34;&gt;PDF&lt;/a&gt;)&lt;/p&gt;</description>
+    </item>
+    
+  </channel>
+</rss>

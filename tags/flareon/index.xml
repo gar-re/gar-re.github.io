@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>flareon on Gar Reversing</title>
+    <link>https://gar-re.github.io/tags/flareon/</link>
+    <description>Recent content in flareon on Gar Reversing</description>
+    <generator>Hugo -- gohugo.io</generator>
+    <lastBuildDate>Sat, 12 Nov 2022 00:00:00 +0000</lastBuildDate><atom:link href="https://gar-re.github.io/tags/flareon/index.xml" rel="self" type="application/rss+xml" />
+    <item>
+      <title>Flare-On 9: 09_encryptor</title>
+      <link>https://gar-re.github.io/posts/flareon9-9/</link>
+      <pubDate>Sat, 12 Nov 2022 00:00:00 +0000</pubDate>
+      
+      <guid>https://gar-re.github.io/posts/flareon9-9/</guid>
+      <description>&lt;p&gt;&lt;a href=&#34;http://flare-on.com&#34;&gt;Flare-On&lt;/a&gt; is an annual single player reverse engineering CTF that represents the skills and challenges that the Mandiant FLARE team faces. The 8-12 challenges increase in difficulty and participants have about 6 weeks to complete them all in order to win a prize.&lt;/p&gt;</description>
+    </item>
+    
+  </channel>
+</rss>

